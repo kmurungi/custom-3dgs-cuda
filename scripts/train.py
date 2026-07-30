@@ -8,6 +8,7 @@ from gaussian_splatting.rasterizer import rasterize
 from gaussian_splatting.utils.loss import calculate_loss
 from gaussian_splatting.utils.saveweights import save_weights
 from gaussian_splatting.utils.dataloader import load_colmap
+from gaussian_splatting.utils.optim import setup_optimizer
 
 def isRefinementIteration(i): 
     if 500 <= i <= 15000 and i % 100 == 0: 
@@ -19,33 +20,38 @@ def train(args):
     """
     Training loop Custom Gaussian Splatting
     """
-
     # initialize gaussian and camera objects
     gaussians, cameras = load_colmap(args.dataset) 
     images = cameras.sample_camera_view() 
+    iteration = 0 
+
+    # learning rate 
+    learning_rates = {
+        "mu": 0.01
+    }
 
     # initialize optimizer
-    optimizer = setup_optimizer()
+    optimizer = setup_optimizer(gaussians, lrs = learning_rates, lr = args.lr)
 
     total_iterations = args.epochs * len(images)
     pbar = tqdm(range(total_iterations), desc="Training 3DGS")
 
     for epoch in args.epochs: 
         random.shuffle(images)
-        for image, i in zip(images, len(images)): 
-            rasterize(gaussians, image)
-            loss = calculate_loss()
-            update_weights(loss)
+        for image in images: 
+            rasterized_image = rasterize(gaussians, image)
+            loss = calculate_loss(image, rasterized_image)
+            update_weights(optimizer, loss)
         
-            if isRefinementIteration(i): 
+            if isRefinementIteration(iteration): 
                 Adaptive_Density_Control()
+
+            iteration+=1
 
         pbar.update(1) 
 
         if epoch % (args.epoch//args.c) == 0: 
             save_weights(gaussians, args.checkpoint_path) # save checkpoint
-        
-
 
     pbar.close()
     save_weights(gaussians, args.output)
