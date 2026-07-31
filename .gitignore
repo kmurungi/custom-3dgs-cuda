@@ -8,3 +8,5 @@ test.ipynb
 data/
 datasets/
 .ipynb_checkpoints/
+input_data/
+input_data_colmap/

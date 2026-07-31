@@ -39,9 +39,9 @@ def train(args):
     for epoch in args.epochs: 
         random.shuffle(images)
         for image in images: 
-            rasterized_image = rasterize(gaussians, image)
+            rasterized_image = rasterize(gaussians, image) # forward pass
             loss = calculate_loss(image, rasterized_image)
-            update_weights(optimizer, loss)
+            update_weights(optimizer, loss) # backward pass 
         
             if isRefinementIteration(iteration): 
                 Adaptive_Density_Control()
