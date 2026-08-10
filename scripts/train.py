@@ -22,7 +22,7 @@ def train(args):
     """
     # initialize gaussian and camera objects
     gaussians, cameras = load_colmap(args.dataset) 
-    images = cameras.sample_camera_view() 
+    images = cameras.sample_camera_view() # camera views 
     iteration = 0 
 
     # learning rate 

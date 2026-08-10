@@ -3,6 +3,7 @@ import torch as t
 class gaussian: 
     # for N gaussians
     def __init__(self, N: int) -> None:
+        self.N = N
         self.mu = t.zeros(N, 3) # center points
         self.q = t.zeros(N, 4)  # quarternions
         self.s = t.zeros(N, 3) # scaling factors
