@@ -6,6 +6,8 @@
 #include "rasterize_backward.h"
 #include "SH_backward.h"
 
+
+//projection function
 torch::Tensor project(
     torch::Tensor means3D, 
     torch::Tensor proj_matrix) 
@@ -15,8 +17,22 @@ torch::Tensor project(
     TORCH_CHECK(proj_matrix.is_cuda(), "proj_matrix must be a CUDA tensor")
 
     // 2. Call the actual CUDA execution function
-    return project_gaussians_forward(means3D, proj_matrix);
+    return project_gaussians_to_2d(means3D, proj_matrix);
 }
+
+//spherical harmonics function 
+
+
+//rasterize function
+
+
+//project_backward
+
+//spherical harmonics backward 
+
+//rasterize_backward 
+
+
 
 //PyBind11 Binding
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

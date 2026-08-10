@@ -37,11 +37,11 @@ def train(args):
     pbar = tqdm(range(total_iterations), desc="Training 3DGS")
 
     for epoch in args.epochs: 
-        random.shuffle(images)
+        random.shuffle(images) # shuffle image order each epoch
         for image in images: 
-            rasterized_image = rasterize(gaussians, image) # forward pass
-            loss = calculate_loss(image, rasterized_image)
-            update_weights(optimizer, loss) # backward pass 
+            rendered_img = rasterize.forward(gaussians, image) # forward pass
+            loss = calculate_loss(image, rendered_img)
+            rasterize.backward(rendered_img, loss) # backward pass 
         
             if isRefinementIteration(iteration): 
                 Adaptive_Density_Control()
