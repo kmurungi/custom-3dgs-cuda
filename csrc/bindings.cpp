@@ -29,7 +29,7 @@ std::tuple<torch::Tensor, torch::Tensor> project(
 }
 
 //spherical harmonics function 
-int spherical_harmonics( 
+torch::Tensor spherical_harmonics( 
     int total_gaussians, 
     const torch::Tensor camera_position, // 3 x 1
     const torch::Tensor mu_world, // N x 3 
@@ -44,7 +44,6 @@ int spherical_harmonics(
         albedo_coeff,
         illumination_coeff
     ); 
-
 }
 
 //rasterize function
