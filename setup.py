@@ -15,10 +15,12 @@ setup(
                 'csrc/backward/projection_backward.cu',      
                 'csrc/backward/rasterize_backward.cu',
                 'csrc/backward/SH_backward.cu',
-            ]
+            ], 
+            include_dirs=["csrc/forward", "csrc/backward"]
         )
     ],
     cmdclass={
         'build_ext': BuildExtension       
-    }
+    }, 
+    
 )
