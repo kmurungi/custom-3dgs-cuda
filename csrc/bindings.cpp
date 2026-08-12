@@ -18,7 +18,6 @@ std::tuple<torch::Tensor, torch::Tensor> project(
     float fx, float fy, float cx, float cy
 ){
    
-    // Call the actual CUDA execution function
     return project_gaussians_to_2d(
         total_gaussians, 
         mu3d,               // N x 3
@@ -31,10 +30,21 @@ std::tuple<torch::Tensor, torch::Tensor> project(
 
 //spherical harmonics function 
 int spherical_harmonics( 
+    int total_gaussians, 
+    const torch::Tensor camera_position, // 3 x 1
+    const torch::Tensor mu_world, // N x 3 
+    const torch::Tensor albedo_coeff, // N x 3 
+    const torch::Tensor illumination_coeff // (N, 15, 3) flattened to 1 contiguous array 
+){
 
-){ 
+    return launch_spherical_harmonics_kernel(
+        total_gaussians,
+        camera_position, 
+        mu_world,
+        albedo_coeff,
+        illumination_coeff
+    ); 
 
-    return launch_spherical_harmonics_kernel(); 
 }
 
 //rasterize function
