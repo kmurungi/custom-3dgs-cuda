@@ -107,8 +107,6 @@ void __global__ spherical_harmonics_kernel(
 
 }
 
-
-
 torch::Tensor launch_spherical_harmonics_kernel(
     int total_gaussians, 
     const torch::Tensor camera_position, // 3 x 1

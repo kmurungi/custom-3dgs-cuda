@@ -17,7 +17,6 @@ std::tuple<torch::Tensor, torch::Tensor> project(
     const torch::Tensor  camera_translation,// 3 x 1 vector
     float fx, float fy, float cx, float cy
 ){
-   
     return project_gaussians_to_2d(
         total_gaussians, 
         mu3d,               // N x 3
@@ -47,6 +46,11 @@ torch::Tensor spherical_harmonics(
 }
 
 //rasterize function
+
+
+
+
+
 
 //project_backward
 
