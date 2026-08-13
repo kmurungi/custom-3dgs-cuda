@@ -15,7 +15,17 @@ __global__ void tile_based_rasterization(
     float2* rendered_img_ptr // H x W
 
 ){ 
+    // FRUSTUM CULLING WAS COMPLETED IN PROJECTION.CU 
     
+    // CREATE TILES
+
+    // ASSIGN PIXEL TO TILE AND DUPLICATE
+
+    // SORT KEYS 
+
+    // PARALLELIZED TILE BLENDING PER PIXEL 
+
+
 
 
 

@@ -16,21 +16,28 @@ class camera:
         self.cx = t.zeros(N, 1) # x principle component
         self.cy = t.zeros(N, 1) # y principle component 
 
-    def sample_camera_view(self): 
+    def sample_camera_view(self):
         """
-        Samples Camera view for forward pass 
-        
-        Returns: 
-            list of dictionary with tensor values for each img
-        """
-        camera_views = [ {
-            "R" : self.R[i], 
-            "T" : self.t[i], 
-            "fx" : self.fx[i], 
-            "fy" : self.fy[i], 
-            "cx" : self.cx[i],
-            "cy" : self.cy[i]
-        } for i in range(self.N)]
+        Samples Camera view for forward pass.
 
+        Returns:
+            list of dictionaries with pose / intrinsics (and image_path if set)
+        """
+        image_paths = getattr(self, "image_paths", [None] * self.N)
+        image_names = getattr(self, "image_names", [None] * self.N)
+
+        camera_views = []
+        for i in range(self.N):
+            camera_views.append(
+                {
+                    "R": self.R[i],
+                    "T": self.t[i],
+                    "fx": self.fx[i],
+                    "fy": self.fy[i],
+                    "cx": self.cx[i],
+                    "cy": self.cy[i],
+                    "image_path": image_paths[i],
+                    "image_name": image_names[i],
+                }
+            )
         return camera_views
-        

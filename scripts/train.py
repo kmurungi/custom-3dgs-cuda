@@ -1,85 +1,126 @@
-import argparse 
+import argparse
+from pathlib import Path
 import random
+
+import numpy as np
 import torch as t
-from tqdm import tqdm 
-from gaussian_splatting.scene.camera import camera
-from gaussian_splatting.scene.gaussian import gaussian 
-from gaussian_splatting.rasterizer import rasterize
-from gaussian_splatting.utils.loss import calculate_loss
-from gaussian_splatting.utils.saveweights import save_weights
+from PIL import Image
+from tqdm import tqdm
+
+from gaussian_splatting.rasterizer.rasterize import rasterize
 from gaussian_splatting.utils.dataloader import load_colmap
+from gaussian_splatting.utils.loss import calculate_loss
 from gaussian_splatting.utils.optim import setup_optimizer
-
-def isRefinementIteration(i): 
-    if 500 <= i <= 15000 and i % 100 == 0: 
-        return True
-    return False
+from gaussian_splatting.utils.saveweights import save_weights
 
 
-def train(args): 
+def is_refinement_iteration(i: int) -> bool:
+    return 500 <= i <= 15000 and i % 100 == 0
+
+
+def adaptive_density_control(gaussians, optimizer):
+    """Placeholder for clone / split / prune. No-op until implemented."""
+    return gaussians, optimizer
+
+
+def load_gt_image(image_path, device: t.device) -> t.Tensor:
+    """Load an RGB image as float tensor in [0, 1] with shape (H, W, 3)."""
+    img = Image.open(image_path).convert("RGB")
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    return t.from_numpy(arr).to(device)
+
+
+def enable_gaussian_grads(gaussians) -> None:
+    for tensor in (gaussians.mu, gaussians.q, gaussians.s, gaussians.alpha, gaussians.A, gaussians.k_j):
+        tensor.requires_grad_(True)
+
+
+def train(args):
     """
     Training loop Custom Gaussian Splatting
     """
-    # initialize gaussian and camera objects
-    gaussians, cameras = load_colmap(args.dataset) 
-    images = cameras.sample_camera_view() # camera views 
-    iteration = 0 
+    device = t.device("cuda" if t.cuda.is_available() else "cpu")
 
-    # learning rate 
+    gaussians, cameras = load_colmap(args.dataset)
+    # Move trainable params to device and enable grads
+    for name in ("mu", "q", "s", "alpha", "A", "k_j"):
+        setattr(gaussians, name, getattr(gaussians, name).to(device))
+    enable_gaussian_grads(gaussians)
+
+    images = cameras.sample_camera_view()
+    for view in images:
+        for key in ("R", "T", "fx", "fy", "cx", "cy"):
+            view[key] = view[key].to(device)
+
     learning_rates = {
-        "mu": 0.01
+        "mu": args.lr * 10.0,
+        "q": args.lr,
+        "s": args.lr,
+        "alpha": args.lr,
+        "A": args.lr,
+        "k_j": args.lr,
     }
+    optimizer = setup_optimizer(gaussians, lrs=learning_rates, lr=args.lr)
 
-    # initialize optimizer
-    optimizer = setup_optimizer(gaussians, lrs = learning_rates, lr = args.lr)
-
+    checkpoint_every = max(1, args.epochs // max(1, args.checkpoints))
     total_iterations = args.epochs * len(images)
-    pbar = tqdm(range(total_iterations), desc="Training 3DGS")
+    iteration = 0
+    pbar = tqdm(total=total_iterations, desc="Training 3DGS")
 
-    for epoch in args.epochs: 
-        random.shuffle(images) # shuffle image order each epoch
-        for image in images: 
-            rendered_img = rasterize.forward(gaussians, image) # forward pass
-            loss = calculate_loss(image, rendered_img)
-            rasterize.backward(rendered_img, loss) # backward pass 
-        
-            if isRefinementIteration(iteration): 
-                Adaptive_Density_Control()
+    for epoch in range(args.epochs):
+        random.shuffle(images)
+        for image in images:
+            if image.get("image_path") is None:
+                raise RuntimeError(
+                    "Camera view is missing image_path. "
+                    "Ensure load_colmap/parse_colmap attached image paths."
+                )
 
-            iteration+=1
+            gt_img = load_gt_image(image["image_path"], device)
+            image["height"], image["width"] = int(gt_img.shape[0]), int(gt_img.shape[1])
+            image["rgb"] = gt_img
 
-        pbar.update(1) 
+            optimizer.zero_grad(set_to_none=True)
+            rendered_img = rasterize(gaussians, image)
+            loss = calculate_loss(gt_img, rendered_img)
+            loss.backward()
+            optimizer.step()
 
-        if epoch % (args.epoch//args.c) == 0: 
-            save_weights(gaussians, args.checkpoint_path) # save checkpoint
+            if is_refinement_iteration(iteration):
+                gaussians, optimizer = adaptive_density_control(gaussians, optimizer)
+
+            iteration += 1
+            pbar.update(1)
+            pbar.set_postfix(loss=float(loss.detach()), epoch=epoch)
+
+        if epoch % checkpoint_every == 0:
+            save_weights(gaussians, Path(args.checkpoint_path) / f"epoch_{epoch:04d}.pt")
 
     pbar.close()
-    save_weights(gaussians, args.output)
+    save_weights(gaussians, Path(args.output) / "gaussians_final.pt")
 
 
-def parse_arguments(): 
+def parse_arguments():
     parser = argparse.ArgumentParser(
         description="3D Gaussian Splatting Training & De-Lighting Engine"
     )
-    parser.add_argument("-d", "--dataset", type = str, help = "path for loading data")
-
-    # optional arguments
-    parser.add_argument("-d", "--delight", type = bool, default = "store_true", help = "activate delighting")
-    parser.add_argument("--lr", type = float, default = 0.001, help = "learning rate")
-    parser.add_argument("-e", "--epochs", type = int, default = 100, help = "epochs")
-    parser.add_argument("-o", "--output", type = str, default = "./output", help = "output folder")
-    parser.add_argument("-c", "--checkpoints", type = int, default = 5, help = "number of checkpoints")
-    parser.add_argument("-cp", "--checkpoint_path", type = str, default = "./checkpoints")
-    parser.add_argument("-b", "--benchmark", type = bool, default = "store_false", help = "save benchmark")
-
-    args = parser.parse_args()
-    return args 
+    parser.add_argument("-d", "--dataset", type=str, required=True, help="path for loading data")
+    parser.add_argument("--delight", action="store_true", help="activate delighting")
+    parser.add_argument("--lr", type=float, default=0.001, help="learning rate")
+    parser.add_argument("-e", "--epochs", type=int, default=100, help="epochs")
+    parser.add_argument("-o", "--output", type=str, default="./output", help="output folder")
+    parser.add_argument("-c", "--checkpoints", type=int, default=5, help="number of checkpoints")
+    parser.add_argument("-cp", "--checkpoint_path", type=str, default="./checkpoints")
+    parser.add_argument("--benchmark", action="store_true", help="save benchmark")
+    return parser.parse_args()
 
 
-def main(): 
+def main():
     args = parse_arguments()
+    Path(args.output).mkdir(parents=True, exist_ok=True)
+    Path(args.checkpoint_path).mkdir(parents=True, exist_ok=True)
     train(args)
 
 
-if __name__ == "__main__": 
+if __name__ == "__main__":
     main()
