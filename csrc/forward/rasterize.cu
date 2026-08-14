@@ -15,11 +15,17 @@ __global__ void tile_based_rasterization(
     float2* rendered_img_ptr // H x W
 
 ){ 
-    // FRUSTUM CULLING WAS COMPLETED IN PROJECTION.CU 
-    
-    // CREATE TILES
-
     // ASSIGN PIXEL TO TILE AND DUPLICATE
+    int tile_x = blockIdx.x; 
+    int tile_y = blockIdx.y; 
+    int px = blockIdx.x * 16 + threadIdx.x; 
+    int py = blockIdx.y * 16 + threadIdx.y; 
+
+    int pixel_idx = py * width + px; 
+    bool is_valid_pixel = (px < width && py < height);
+    if (!is_valid_pixel) return; 
+
+    // FRUSTUM CULLING WAS COMPLETED IN PROJECTION.CU 
 
     // SORT KEYS 
 

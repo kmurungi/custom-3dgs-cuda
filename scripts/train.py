@@ -82,7 +82,7 @@ def train(args):
 
             optimizer.zero_grad(set_to_none=True)
             rendered_img = rasterize(gaussians, image)
-            loss = calculate_loss(gt_img, rendered_img)
+            loss = "calculate_loss"(gt_img, rendered_img)
             loss.backward()
             optimizer.step()
 
