@@ -57,72 +57,95 @@ torch::Tensor launch_rasterization(
 
 
     // 1 gaussian per thread
-    int threadsPerBlock = 256; 
-    int blocks = (num_gaussians + threadsPerBlock - 1)/threadsPerBlock; 
+    const int threads = 256;
+    int blocks = (num_gaussians + threads - 1) / threads;
+
+    constexpr int TILE_SIZE = 16;
+    const int tiles_x = (width + TILE_SIZE - 1) / TILE_SIZE;
+    const int tiles_y = (height + TILE_SIZE - 1) / TILE_SIZE;
+    const int total_tiles = tiles_x * tiles_y;
 
     
     /*////////////////////////////
     COUNT OVERLAPS 
     */////////////////////////////
     auto device = mean_2d.device(); 
-    auto options = torch::TensorOptions().dtype(torch::kInt32).device(device);
-    torch::Tensor num_overlap = torch::zeros({num_gaussians}, options); 
-    float* num_overlap_ptr = num_overlap.data_ptr<float>();
+    auto int_options = torch::TensorOptions().dtype(torch::kInt32).device(device);
+    auto byte_options = torch::TensorOptions().dtype(torch::kUInt8).device(device);
+    auto key_options = torch::TensorOptions().dtype(torch::kInt64).device(device);
+    torch::Tensor num_overlap = torch::zeros({num_gaussians}, int_options); 
+    int* num_overlap_ptr = num_overlap.data_ptr<int>();
 
-    count_overlaps<<<blocks, threadsPerBlock>>>(
-        mean_2d,
-        cov_2d, 
+    count_overlaps<<<blocks, threads>>>(
+        mean_2d_ptr,
+        cov_2d_ptr, 
         num_overlap_ptr
     ); 
     
     /*////////////////////////////
     PREFIX ARRAY + CREATION OF BUFFER ARRAY
     */////////////////////////////
-    torch::Tensor offset = torch::zeros({num_gaussians}, options); 
-    float* offset_ptr = offset.data_ptr<float>();
+    torch::Tensor offset = torch::zeros({num_gaussians}, int_options); 
+    int* offset_ptr = offset.data_ptr<int>();
     size_t temp_storage_bytes = 0; 
     
     cub::DeviceScan::ExclusiveSum( 
         nullptr, temp_storage_bytes, 
-        count_overlap_ptr, offset_ptr, num_gaussians
+        num_overlap_ptr, offset_ptr, num_gaussians
+    ); // query temp storage size
+    auto scan_temp = torch::empty({static_cast<long>(temp_storage_bytes)}, byte_options);
+    cub::DeviceScan::ExclusiveSum(
+        scan_temp.data_ptr(), temp_storage_bytes,
+        num_overlap_ptr, offset_ptr, num_gaussians
     ); // prefix sum returned in offset
 
     /*////////////////////////////
     KEY GENERATION + DUPLICATION
     */////////////////////////////
-    int total_duplicated_pairs = offset[-1] + num_overlap_ptr[-1]; 
+    int last_offset = 0;
+    int last_count = 0;
 
-    torch::Tensor unsorted_keys = torch::zeros({total_duplicated_pairs}, options); 
-    torch::Tensor unsorted_ids = torch::zeros({total_duplicated_pairs}, options); 
+    // mem back to cpu
+    cudaMemcpy(
+        &last_offset, offset_ptr + num_gaussians - 1, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(
+        &last_count, num_overlap_ptr + num_gaussians - 1, sizeof(int), cudaMemcpyDeviceToHost);
+    int total_duplicated_pairs = last_offset + last_count; 
 
-    key_generation<<<blocks, threadsPerBlock>>>(
+    torch::Tensor unsorted_keys = torch::zeros({total_duplicated_pairs}, key_options); 
+    torch::Tensor unsorted_ids = torch::zeros({total_duplicated_pairs}, int_options); 
+    int64_t* unsorted_keys_ptr = unsorted_keys.data_ptr<int64_t>();
+    int* unsorted_ids_ptr = unsorted_ids.data_ptr<int>();
+
+    key_generation<<<blocks, threads>>>(
         num_gaussians, 
         mean_2d_ptr,
         depths_ptr, 
         offset_ptr, 
-        unsorted_keys, 
-        unsorted_ids
+        unsorted_keys_ptr, 
+        unsorted_ids_ptr
     ); 
 
     /*////////////////////////////
     RADIX SORT
     */////////////////////////////
-    auto sorted_keys = torch::empty({total_duplicated_pairs}, options); 
-    auto sorted_ids = torch::empty({total_duplicated_pairs}, options);
+    auto sorted_keys = torch::empty({total_duplicated_pairs}, key_options); 
+    auto sorted_ids = torch::empty({total_duplicated_pairs}, int_options);
 
+    temp_storage_bytes = 0;
     cub::DeviceRadixSort::SortPairs(
         nullptr, temp_storage_bytes,
-        reinterpret_cast<uint64_t*>(unsorted_keys.data_ptr<int64_t>()),
+        reinterpret_cast<uint64_t*>(unsorted_keys_ptr),
         reinterpret_cast<uint64_t*>(sorted_keys.data_ptr<int64_t>()),
-        unsorted_ids.data_ptr<int>(), sorted_ids.data_ptr<int>(),
+        unsorted_ids_ptr, sorted_ids.data_ptr<int>(),
         total_duplicated_pairs
     );
-    auto temp_buffer2 = torch::empty({(long)temp_storage_bytes}, options);
+    auto sort_temp = torch::empty({static_cast<long>(temp_storage_bytes)}, byte_options);
     cub::DeviceRadixSort::SortPairs(
-        temp_buffer2.data_ptr(), temp_storage_bytes,
-        reinterpret_cast<uint64_t*>(unsorted_keys.data_ptr<int64_t>()),
+        sort_temp.data_ptr(), temp_storage_bytes,
+        reinterpret_cast<uint64_t*>(unsorted_keys_ptr),
         reinterpret_cast<uint64_t*>(sorted_keys.data_ptr<int64_t>()),
-        unsorted_ids.data_ptr<int>(), sorted_ids.data_ptr<int>(),
+        unsorted_ids_ptr, sorted_ids.data_ptr<int>(),
         total_duplicated_pairs
     );
 
@@ -130,13 +153,14 @@ torch::Tensor launch_rasterization(
     /*////////////////////////////
     TILE RANGE 
     */////////////////////////////
-    auto tile_ranges = torch::zeros({total_tiles, 2}, options); 
+    auto tile_ranges = torch::zeros({total_tiles, 2}, int_options); 
+    int2* tile_ranges_ptr = reinterpret_cast<int2*>(tile_ranges.data_ptr<int>());
     int blocks_m = (total_duplicated_pairs + threads - 1) / threads; 
     
     identify_tile_ranges_kernel<<<blocks_m, threads>>>(
         total_duplicated_pairs,
         reinterpret_cast<uint64_t*>(sorted_keys.data_ptr<int64_t>()),
-        reinterpret_cast<int2*>(tile_ranges.data_ptr<int>())
+        tile_ranges_ptr
     ); 
 
     /*////////////////////////////
@@ -144,24 +168,24 @@ torch::Tensor launch_rasterization(
     *////////////////////////////
 
     // tile based parallelization: 16 x 16 pixel tiles
-    dim3 threadsPerBlock(16, 16);
-    dim3 numBlocks(
-         (width + threadsPerBlock.x - 1) / threadsPerBlock.x,
-         (height + threadsPerBlock.y - 1) / threadsPerBlock.y
+    dim3 render_threads(TILE_SIZE, TILE_SIZE);
+    dim3 render_blocks(
+        (width + render_threads.x - 1) / render_threads.x,
+        (height + render_threads.y - 1) / render_threads.y
      );
     // rendered img 
-    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(mean_2d.device());
-    torch::Tensor rendered_img = torch::zeros({height, width, 3}, options);
+    auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(device);
+    torch::Tensor rendered_img = torch::zeros({height, width, 3}, float_options);
     float3* rendered_img_ptr  = reinterpret_cast<float3*>(rendered_img.data_ptr<float>());
     
-    tile_based_rasterization<<<numBlocks, threadsPerBlock>>>(
+    tile_based_rasterization<<<render_blocks, render_threads>>>(
         num_gaussians, // N
         mean_2d_ptr, // N x 2
         cov_2d_ptr,  // N x 2 x 2
         colors_ptr,  // N x 3 
         alpha_ptr,  // N x 1 
         height, width, 
-        tile_ranges, 
+        tile_ranges_ptr, 
         rendered_img_ptr // Height x Width
     ); 
 
