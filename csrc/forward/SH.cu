@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <cuda_runtime.h>
 #define GLM_FORCE_CUDA
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
@@ -23,6 +24,7 @@ constexpr float SH_C3_2 = -0.4570457994644658f;
 constexpr float SH_C3_3 = 0.3731763325901154f;
 constexpr float SH_C3_4 = -0.4570457994644658f;
 constexpr float SH_C3_5 = 1.445305721320277f;
+constexpr float SH_C3_6 = -0.5900435899266435f;
 
 // Evaluates the 15 higher-order basis polynomials given normalized direction (x, y, z)
 __device__ inline void compute_sh_basis_15(float x, float y, float z, float* Y) {
@@ -51,9 +53,9 @@ __device__ inline void compute_sh_basis_15(float x, float y, float z, float* Y) 
     Y[14] = SH_C3_6 * x * (xx - 3.0f * yy);
 }
 
-void __global__ spherical_harmonics_kernel(
+__global__ void spherical_harmonics_kernel(
     int total_gaussians, 
-    const float3 __restrict__ camera_position, // 3 x 1 vector 
+    float3 camera_position,
     const float3* __restrict__ mu_3d,  // N x 3 
     const float3* __restrict__ albedo_coeff, // N x 3
     const float* __restrict__ illumination_coeff, // Tensor of shape (N, 15, 3) flattened
@@ -62,20 +64,15 @@ void __global__ spherical_harmonics_kernel(
     int idx = blockIdx.x * blockDim.x + threadIdx.x; 
     if (idx >= total_gaussians) return; 
 
-    // GLMize matrices and vectors 
-    glm::vec3 camera_world(camera_position[0].x, camera_position[0].y, camera_position[0].z); 
+    glm::vec3 camera_world(camera_position.x, camera_position.y, camera_position.z); 
     glm::vec3 mu_world(mu_3d[idx].x, mu_3d[idx].y, mu_3d[idx].z); 
     glm::vec3 a_coeff(albedo_coeff[idx].x, albedo_coeff[idx].y, albedo_coeff[idx].z); 
     const float* i_coeff_ptr = illumination_coeff + (idx * 45);
     
-    // calculate directions 
     glm::vec3 dir = mu_world - camera_world; 
     glm::vec3 direction = glm::normalize(dir);
 
-    /*
-    BASE ALBEDO CALCULATION
-    */
-    glm::vec3 base_albedo = albedo_coeff[idx] * SH_C0; 
+    glm::vec3 base_albedo = a_coeff * SH_C0; 
     
     /*
     ILLUMINATION CALCULATION
@@ -86,23 +83,17 @@ void __global__ spherical_harmonics_kernel(
   
     glm::vec3 illumination(0.0f);
     for (int k = 0; k < 15; ++k) {
-        illumination.r += Y[k] * i_coeff_ptr[k * 3 + 0];
-        illumination.g += Y[k] * i_coeff_ptr[k * 3 + 1];
-        illumination.b += Y[k] * i_coeff_ptr[k * 3 + 2];
+        illumination.x += Y[k] * i_coeff_ptr[k * 3 + 0];
+        illumination.y += Y[k] * i_coeff_ptr[k * 3 + 1];
+        illumination.z += Y[k] * i_coeff_ptr[k * 3 + 2];
     }
 
-
-    /*
-    FINAL COLOR CALCULATION
-    */
-    glm::vec3 final_rgb = base_albedo * illumination; // point wise 
+    glm::vec3 final_rgb = base_albedo * illumination;
     
-    
-    // Clamp to [0, 1]
     colors_ptr[idx] = make_float3(
-        fminf(fmaxf(final_rgb.r, 0.0f), 1.0f),
-        fminf(fmaxf(final_rgb.g, 0.0f), 1.0f),
-        fminf(fmaxf(final_rgb.b, 0.0f), 1.0f)
+        fminf(fmaxf(final_rgb.x, 0.0f), 1.0f),
+        fminf(fmaxf(final_rgb.y, 0.0f), 1.0f),
+        fminf(fmaxf(final_rgb.z, 0.0f), 1.0f)
     );
 
 }
@@ -126,10 +117,10 @@ torch::Tensor launch_spherical_harmonics_kernel(
     TORCH_CHECK(mu_world.is_contiguous(), "mu_world must be contiguous in memory");
     TORCH_CHECK(albedo_coeff.is_contiguous(), "albedo_coeff must be contiguous in memory");
     TORCH_CHECK(illumination_coeff.is_contiguous(), "illumination_coeff must be contiguous in memory");
+    TORCH_CHECK(camera_position.numel() >= 3, "camera_position must have 3 elements");
 
-    // extract float ptrs from tensors 
-    // const float3* camera_position_ptr = reinterpret_cast<const float3*>(camera_position.data_ptr<float>()); 
-    const float3 camera_position_ = reinterpret_cast<const float3>(camera_position);
+    const float* cam_ptr = camera_position.data_ptr<float>();
+    float3 camera_position_ = make_float3(cam_ptr[0], cam_ptr[1], cam_ptr[2]);
     const float3* mu_world_ptr = reinterpret_cast<const float3*>(mu_world.data_ptr<float>()); 
     const float3* albedo_coeff_ptr = reinterpret_cast<const float3*>(albedo_coeff.data_ptr<float>()); 
     const float* illumination_coeff_ptr = reinterpret_cast<const float*>(illumination_coeff.data_ptr<float>()); 

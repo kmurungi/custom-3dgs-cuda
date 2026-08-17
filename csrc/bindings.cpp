@@ -5,7 +5,7 @@
 
 
 //projection function
-std::tuple<torch::Tensor, torch::Tensor> project(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> project(
     int total_gaussians,
     const torch::Tensor mu3d,
     const torch::Tensor q3d,
@@ -44,6 +44,7 @@ torch::Tensor spherical_harmonics(
 //rasterize function
 torch::Tensor rasterize(
     int num_gaussians,
+    const torch::Tensor depths,
     const torch::Tensor mean_2d,
     const torch::Tensor cov_2d,
     const torch::Tensor colors,
@@ -53,6 +54,7 @@ torch::Tensor rasterize(
 ){
     return launch_rasterization(
         num_gaussians,
+        depths,
         mean_2d,
         cov_2d,
         colors,

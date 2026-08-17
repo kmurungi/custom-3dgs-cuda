@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <cuda_runtime.h>
 #define GLM_FORCE_CUDA
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
@@ -16,7 +17,8 @@ __global__ void projection_fused(
     const float3* __restrict__ camera_translation,// 3 x 1 vector
     float fx, float fy, float cx, float cy, 
     float2* __restrict__ mu2d,                     // N x 2 screen pixels
-    float3* __restrict__ cov2d                     // N x 3 symmetric 2x2 covariance (a, b, c)
+    float3* __restrict__ cov2d,                    // N x 3 symmetric 2x2 covariance (a, b, c)
+    float* __restrict__ depths                     // N camera-space z
 ){ 
     // 1 Thread per Gaussian
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -42,6 +44,8 @@ __global__ void projection_fused(
 
     // Frustum Cull
     if (mu_cam.z <= 0.2f) return;
+
+    depths[idx] = mu_cam.z;
 
     // Camera to Screen Pixels
     float2 screen_pos = make_float2(
@@ -102,7 +106,7 @@ __global__ void projection_fused(
 }
 
 //pass in set 
-std::tuple<torch::Tensor, torch::Tensor> project_gaussians_to_2d(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> project_gaussians_to_2d(
     int total_gaussians, 
     const torch::Tensor  mu3d,               // N x 3
     const torch::Tensor  q3d,                // N x 4 (w, x, y, z)
@@ -140,16 +144,18 @@ std::tuple<torch::Tensor, torch::Tensor> project_gaussians_to_2d(
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(mu3d.device());
     torch::Tensor mu2d_tensor  = torch::zeros({total_gaussians, 2}, options);
     torch::Tensor cov2d_tensor = torch::zeros({total_gaussians, 3}, options); // (a, b, c)
+    torch::Tensor depths_tensor = torch::zeros({total_gaussians}, options);
 
     float2* mu2d_ptr  = reinterpret_cast<float2*>(mu2d_tensor.data_ptr<float>());
     float3* cov2d_ptr = reinterpret_cast<float3*>(cov2d_tensor.data_ptr<float>());
+    float* depths_ptr = depths_tensor.data_ptr<float>();
 
     projection_fused<<<numBlocks, numThreadsPerBlock>>>(
         total_gaussians,
         mu3d_ptr, q3d_ptr, s3d_ptr, camera_rotation_ptr, camera_translation_ptr, 
         fx, fy, cx, cy, 
-        mu2d_ptr, cov2d_ptr
+        mu2d_ptr, cov2d_ptr, depths_ptr
     );
 
-    return std::make_tuple(mu2d_tensor, cov2d_tensor);
+    return std::make_tuple(mu2d_tensor, cov2d_tensor, depths_tensor);
 }

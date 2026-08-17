@@ -37,12 +37,12 @@ class RasterizeFunction(t.autograd.Function):
         cam_position = -t.matmul(cam_rotation.T, cam_translation)
         cam_position = cam_position.reshape(3).contiguous()
 
-        mean_2d, cov_2d = crc.project(
+        mean_2d, cov_2d, depths = crc.project(
             num_gaussians, mu, q, s, cam_rotation, cam_translation, fx_f, fy_f, cx_f, cy_f
         )
         colors = crc.SH(num_gaussians, cam_position, mu, albedo, k_j)
         rendered_img = crc.rasterize(
-            num_gaussians, mean_2d, cov_2d, colors, alpha, img_h, img_w
+            num_gaussians, depths, mean_2d, cov_2d, colors, alpha, img_h, img_w
         )
 
         ctx.save_for_backward(mu, q, s, alpha, albedo, k_j)

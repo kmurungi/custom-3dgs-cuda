@@ -12,15 +12,11 @@ from gaussian_splatting.utils.dataloader import load_colmap
 from gaussian_splatting.utils.loss import calculate_loss
 from gaussian_splatting.utils.optim import setup_optimizer
 from gaussian_splatting.utils.saveweights import save_weights
+from gaussian_splatting.utils.adc import adaptive_density_control
 
 
 def is_refinement_iteration(i: int) -> bool:
     return 500 <= i <= 15000 and i % 100 == 0
-
-
-def adaptive_density_control(gaussians, optimizer):
-    """Placeholder for clone / split / prune. No-op until implemented."""
-    return gaussians, optimizer
 
 
 def load_gt_image(image_path, device: t.device) -> t.Tensor:
@@ -82,7 +78,7 @@ def train(args):
 
             optimizer.zero_grad(set_to_none=True)
             rendered_img = rasterize(gaussians, image)
-            loss = "calculate_loss"(gt_img, rendered_img)
+            loss = calculate_loss(gt_img, rendered_img)
             loss.backward()
             optimizer.step()
 

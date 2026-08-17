@@ -2,7 +2,7 @@
 #include <tuple>
 #include <torch/extension.h>
 
-std::tuple<torch::Tensor, torch::Tensor> project_gaussians_to_2d(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> project_gaussians_to_2d(
     int total_gaussians, 
     const torch::Tensor  mu3d,               // N x 3
     const torch::Tensor  q3d,                // N x 4 (w, x, y, z)
