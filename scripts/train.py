@@ -12,11 +12,19 @@ from gaussian_splatting.utils.dataloader import load_colmap
 from gaussian_splatting.utils.loss import calculate_loss
 from gaussian_splatting.utils.optim import setup_optimizer
 from gaussian_splatting.utils.saveweights import save_weights
-from gaussian_splatting.utils.adc import adaptive_density_control
+from gaussian_splatting.utils.adc import (
+    accumulate_densification_stats,
+    adaptive_density_control,
+    ensure_densification_state,
+)
 
 
 def is_refinement_iteration(i: int) -> bool:
     return 500 <= i <= 15000 and i % 100 == 0
+
+
+def is_opacity_reset_iteration(i: int) -> bool:
+    return 500 <= i <= 15000 and i > 0 and i % 3000 == 0
 
 
 def load_gt_image(image_path, device: t.device) -> t.Tensor:
@@ -57,6 +65,7 @@ def train(args):
         "k_j": args.lr,
     }
     optimizer = setup_optimizer(gaussians, lrs=learning_rates, lr=args.lr)
+    ensure_densification_state(gaussians)
 
     checkpoint_every = max(1, args.epochs // max(1, args.checkpoints))
     total_iterations = args.epochs * len(images)
@@ -80,14 +89,23 @@ def train(args):
             rendered_img = rasterize(gaussians, image)
             loss = calculate_loss(gt_img, rendered_img)
             loss.backward()
+            accumulate_densification_stats(gaussians)
             optimizer.step()
 
             if is_refinement_iteration(iteration):
-                gaussians, optimizer = adaptive_density_control(gaussians, optimizer)
+                gaussians, optimizer = adaptive_density_control(
+                    gaussians,
+                    optimizer,
+                    reset_opacity=is_opacity_reset_iteration(iteration),
+                )
 
             iteration += 1
             pbar.update(1)
-            pbar.set_postfix(loss=float(loss.detach()), epoch=epoch)
+            pbar.set_postfix(
+                loss=float(loss.detach()),
+                epoch=epoch,
+                N=gaussians.N,
+            )
 
         if epoch % checkpoint_every == 0:
             save_weights(gaussians, Path(args.checkpoint_path) / f"epoch_{epoch:04d}.pt")
