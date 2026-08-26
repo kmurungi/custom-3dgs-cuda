@@ -1,7 +1,11 @@
 #include <torch/extension.h>
-#include "projection.h"
-#include "rasterize.h"
-#include "SH.h"
+#include "forward/projection.h"
+#include "forward/rasterize.h"
+#include "forward/SH.h"
+
+#include "backward/delight_backward.h"
+#include "backward/projection_backward.h"
+#include "rbackward/asterize_backward.h"
 
 
 //projection function
@@ -64,9 +68,45 @@ torch::Tensor rasterize(
     );
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>backwards_rasterization(
+    const float grad_output
+){
+    return launch_backwards_rasterization(
+        grad_output
+    );
+}
+
+std::tuple<torch::Tensor, torch::Tensor>backwards_SH(
+    const torch::Tensor colors, 
+    const torch::Tensor alpha
+){
+    return launch_backwards_SH(
+        colors, 
+        alpha
+    );
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>backwards_projection(
+    const torch::Tensor mean_2d, 
+    const torch::Tensor cov_2d
+){
+    return launch_backwards_projection(
+        mean_2d, 
+        cov_2d
+    );
+}
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    //forward kernels
     m.def("project", &project, "3DGS Projection (CUDA)");
     m.def("SH", &spherical_harmonics, "3DGS Spherical Harmonics (CUDA)");
     m.def("rasterize", &rasterize, "3DGS Tile Rasterization (CUDA)");
+
+    //backwards kernels
+    m.def("backwards_rasterization", &backwards_rasterization, "3DGS Backwards Rasterization (CUDA)"); 
+    m.def("backwards_SH", &backwards_SH, "3DGS backwards Delighting (CUDA)"); 
+    m.def("backwards_projection", &backwards_projection, "3DGS Backwards Projection (CUDA)"); 
+
+
 }

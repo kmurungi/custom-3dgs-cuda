@@ -45,20 +45,36 @@ class RasterizeFunction(t.autograd.Function):
             num_gaussians, depths, mean_2d, cov_2d, colors, alpha, img_h, img_w
         )
 
-        ctx.save_for_backward(mu, q, s, alpha, albedo, k_j)
+        ctx.save_for_backward(mu, q, s, alpha, albedo, k_j) # need to update with intermediate calculations
         return rendered_img
 
     @staticmethod
     def backward(ctx, grad_output):
-        # Placeholder until CUDA backward kernels are wired.
         mu, q, s, alpha, albedo, k_j = ctx.saved_tensors
+        mu = mu.contiguous()
+        q = q.contiguous()
+        s = s.contiguous()
+        alpha = alpha.contiguous()
+        albedo = albedo.contiguous()
+        k_j = k_j.contiguous()
+
+        mean_2d, cov_2d, colors, alpha_grad = crc.backwards_rasterization(
+            grad_output, 
+        )
+        albedo_grad, k_j_grad = crc.backwards_SH(
+            colors, alpha
+        )
+        mu_world, q_grad, s_grad = crc.backwards_projection(
+            mean_2d, cov_2d
+        )
+        
         return (
-            None,  # mu
-            None,  # q
-            None,  # s
-            None,  # alpha
-            None,  # albedo
-            None,  # k_j
+            mu_world,  # mu
+            q_grad,  # q
+            s_grad,  # s
+            alpha_grad,  # alpha
+            albedo_grad,  # albedo
+            k_j_grad,  # k_j
             None,  # cam_rotation
             None,  # cam_translation
             None,  # fx
