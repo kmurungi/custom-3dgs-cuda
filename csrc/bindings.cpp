@@ -46,7 +46,8 @@ torch::Tensor spherical_harmonics(
 }
 
 //rasterize function
-torch::Tensor rasterize(
+// Returns: rendered_img, sorted_ids, tile_ranges, final_T, n_contrib
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> rasterize(
     int num_gaussians,
     const torch::Tensor depths,
     const torch::Tensor mean_2d,

@@ -173,7 +173,9 @@ __global__ void tile_based_rasterization(
     const float3* __restrict__ cov_2d,      // N x 3 covariance [a, b, c]
     const float3* __restrict__ colors,
     const float* __restrict__ alphas,
-    float3* __restrict__ out_img
+    float3* __restrict__ out_img,
+    float* __restrict__ final_T,            // H * W leftover transmittance
+    int* __restrict__ n_contrib             // H * W last contributing Gaussian (1-based)
 ){
     constexpr int BLOCK_SIZE = 256; // 16x16 tile
 
@@ -206,6 +208,8 @@ __global__ void tile_based_rasterization(
     float3 pix_color = make_float3(0.0f, 0.0f, 0.0f);
     float T = 1.0f; // Transmittance starts at 100%
     bool done = !inside_screen;
+    int contributor = 0;
+    int last_contributor = 0;
 
     for (int progress = 0; progress < K; progress += BLOCK_SIZE) {
         int remaining = K - progress;
@@ -219,7 +223,7 @@ __global__ void tile_based_rasterization(
             float3 cov = cov_2d[gaussian_id];
             float det = cov.x * cov.z - cov.y * cov.y;
             float det_inv = (det > 0.0f) ? (1.0f / det) : 0.0f;
-            // conic = inverse covariance
+            // conic = inverse covariance; recomputed identically in backward
             s_conics[thread_id_1d] = make_float3(
                 cov.z * det_inv,
                 -cov.y * det_inv,
@@ -235,6 +239,7 @@ __global__ void tile_based_rasterization(
         // blend loaded batch into this pixel
         if (!done) {
             for (int i = 0; i < to_load; i++) {
+                contributor++;
                 float2 mean = s_means[i];
                 float dx = (float)px - mean.x;
                 float dy = (float)py - mean.y;
@@ -255,6 +260,7 @@ __global__ void tile_based_rasterization(
                 pix_color.z += s_colors[i].z * weight;
 
                 T *= (1.0f - alpha);
+                last_contributor = contributor;
                 if (T < 1e-4f) {
                     done = true;
                     break;
@@ -268,11 +274,14 @@ __global__ void tile_based_rasterization(
 
     if (inside_screen) {
         out_img[pixel_idx] = pix_color;
+        final_T[pixel_idx] = T;
+        n_contrib[pixel_idx] = last_contributor;
     }
 }
 
 
-torch::Tensor launch_rasterization(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+launch_rasterization(
     int num_gaussians, // N
     const torch::Tensor depths, // N x 1 (needed for depth)
     const torch::Tensor mean_2d, // N x 2
@@ -284,10 +293,28 @@ torch::Tensor launch_rasterization(
 ){
     auto device = mean_2d.device();
     auto float_options = torch::TensorOptions().dtype(torch::kFloat32).device(device);
+    auto int_options = torch::TensorOptions().dtype(torch::kInt32).device(device);
+    auto byte_options = torch::TensorOptions().dtype(torch::kUInt8).device(device);
+    auto key_options = torch::TensorOptions().dtype(torch::kInt64).device(device);
+
+    constexpr int TILE_SIZE = 16;
+    const int tiles_x = (width + TILE_SIZE - 1) / TILE_SIZE;
+    const int tiles_y = (height + TILE_SIZE - 1) / TILE_SIZE;
+    const int total_tiles = tiles_x * tiles_y;
+
+    auto empty_buffers = [&]() {
+        return std::make_tuple(
+            torch::zeros({height, width, 3}, float_options),
+            torch::empty({0}, int_options),
+            torch::zeros({total_tiles, 2}, int_options),
+            torch::ones({height, width}, float_options),
+            torch::zeros({height, width}, int_options)
+        );
+    };
 
     // Early exit: no gaussians
     if (num_gaussians == 0) {
-        return torch::zeros({height, width, 3}, float_options);
+        return empty_buffers();
     }
 
     // cuda tensor checks
@@ -325,17 +352,9 @@ torch::Tensor launch_rasterization(
     const int threads = 256;
     int blocks = (num_gaussians + threads - 1) / threads;
 
-    constexpr int TILE_SIZE = 16;
-    const int tiles_x = (width + TILE_SIZE - 1) / TILE_SIZE;
-    const int tiles_y = (height + TILE_SIZE - 1) / TILE_SIZE;
-    const int total_tiles = tiles_x * tiles_y;
-
     /*////////////////////////////
     COUNT OVERLAPS: KERNEL 1 
     */////////////////////////////
-    auto int_options = torch::TensorOptions().dtype(torch::kInt32).device(device);
-    auto byte_options = torch::TensorOptions().dtype(torch::kUInt8).device(device);
-    auto key_options = torch::TensorOptions().dtype(torch::kInt64).device(device);
     torch::Tensor num_overlap = torch::zeros({num_gaussians}, int_options); 
     int* num_overlap_ptr = num_overlap.data_ptr<int>();
 
@@ -380,7 +399,7 @@ torch::Tensor launch_rasterization(
 
     // Early exit: no tile overlaps
     if (total_duplicated_pairs == 0) {
-        return torch::zeros({height, width, 3}, float_options);
+        return empty_buffers();
     }
 
     torch::Tensor unsorted_keys = torch::zeros({total_duplicated_pairs}, key_options);
@@ -449,9 +468,13 @@ torch::Tensor launch_rasterization(
         (height + render_threads.y - 1) / render_threads.y, 
         1
      );
-    // rendered img
+    // rendered img + backward reconstruction buffers
     torch::Tensor rendered_img = torch::zeros({height, width, 3}, float_options);
+    torch::Tensor final_T = torch::ones({height, width}, float_options);
+    torch::Tensor n_contrib = torch::zeros({height, width}, int_options);
     float3* rendered_img_ptr  = reinterpret_cast<float3*>(rendered_img.data_ptr<float>());
+    float* final_T_ptr = final_T.data_ptr<float>();
+    int* n_contrib_ptr = n_contrib.data_ptr<int>();
     
     tile_based_rasterization<<<render_blocks, render_threads>>>(
         height, width,
@@ -462,8 +485,10 @@ torch::Tensor launch_rasterization(
         reinterpret_cast<const float3*>(cov_2d_ptr),
         colors_ptr,
         alpha_ptr,
-        rendered_img_ptr
+        rendered_img_ptr,
+        final_T_ptr,
+        n_contrib_ptr
     ); 
 
-    return rendered_img; 
+    return std::make_tuple(rendered_img, sorted_ids, tile_ranges, final_T, n_contrib);
 }
