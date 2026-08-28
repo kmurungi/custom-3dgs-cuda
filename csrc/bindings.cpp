@@ -5,7 +5,7 @@
 
 #include "backward/delight_backward.h"
 #include "backward/projection_backward.h"
-#include "rbackward/asterize_backward.h"
+#include "backward/rasterize_backward.h"
 
 
 //projection function
@@ -69,31 +69,71 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     );
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>backwards_rasterization(
-    const float grad_output
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> backwards_rasterization(
+    const torch::Tensor grad_output,
+    const torch::Tensor mean_2d,
+    const torch::Tensor cov_2d,
+    const torch::Tensor colors,
+    const torch::Tensor alpha,
+    const torch::Tensor sorted_ids,
+    const torch::Tensor tile_ranges,
+    const torch::Tensor final_T,
+    const torch::Tensor n_contrib,
+    int num_gaussians,
+    int height,
+    int width
 ){
-    return launch_backwards_rasterization(
-        grad_output
+    return launch_backward_rasterization(
+        grad_output,
+        mean_2d,
+        cov_2d,
+        colors,
+        alpha,
+        sorted_ids,
+        tile_ranges,
+        final_T,
+        n_contrib,
+        num_gaussians,
+        height,
+        width
     );
 }
 
-std::tuple<torch::Tensor, torch::Tensor>backwards_SH(
-    const torch::Tensor colors, 
-    const torch::Tensor alpha
+std::tuple<torch::Tensor, torch::Tensor> backwards_SH(
+    const torch::Tensor colors_grad,
+    const torch::Tensor mu,
+    const torch::Tensor albedo,
+    const torch::Tensor k_j,
+    const torch::Tensor camera_position
 ){
-    return launch_backwards_SH(
-        colors, 
-        alpha
+    return launch_backward_SH(
+        colors_grad,
+        mu,
+        albedo,
+        k_j,
+        camera_position
     );
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>backwards_projection(
-    const torch::Tensor mean_2d, 
-    const torch::Tensor cov_2d
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> backwards_projection(
+    const torch::Tensor mean_2d_grad,
+    const torch::Tensor cov_2d_grad,
+    const torch::Tensor mu,
+    const torch::Tensor q,
+    const torch::Tensor s,
+    const torch::Tensor camera_rotation,
+    const torch::Tensor camera_translation,
+    float fx, float fy, float cx, float cy
 ){
-    return launch_backwards_projection(
-        mean_2d, 
-        cov_2d
+    return launch_backward_projection(
+        mean_2d_grad,
+        cov_2d_grad,
+        mu,
+        q,
+        s,
+        camera_rotation,
+        camera_translation,
+        fx, fy, cx, cy
     );
 }
 
