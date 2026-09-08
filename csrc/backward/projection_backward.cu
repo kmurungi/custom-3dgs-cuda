@@ -99,21 +99,21 @@ __global__ void backward_projection(
 
     
     glm::mat3 dL_dRt = glm::transpose(dl_dR);
-    float r = quat.w;
-    float x = quat.x;
-    float y = quat.y;
-    float z = quat.z;
+    float qw = quat.w;
+    float qx = quat.x;
+    float qy = quat.y;
+    float qz = quat.z;
     float4 dq = make_float4(
-        2.0f * z * (dL_dRt[0][1] - dL_dRt[1][0]) + 2.0f * y * (dL_dRt[2][0] - dL_dRt[0][2]) + 2.0f * x * (dL_dRt[1][2] - dL_dRt[2][1]),
-        2.0f * y * (dL_dRt[1][0] + dL_dRt[0][1]) + 2.0f * z * (dL_dRt[2][0] + dL_dRt[0][2]) + 2.0f * r * (dL_dRt[1][2] - dL_dRt[2][1]) - 4.0f * x * (dL_dRt[2][2] + dL_dRt[1][1]),
-        2.0f * x * (dL_dRt[1][0] + dL_dRt[0][1]) + 2.0f * r * (dL_dRt[2][0] - dL_dRt[0][2]) + 2.0f * z * (dL_dRt[1][2] + dL_dRt[2][1]) - 4.0f * y * (dL_dRt[2][2] + dL_dRt[0][0]),
-        2.0f * r * (dL_dRt[0][1] - dL_dRt[1][0]) + 2.0f * x * (dL_dRt[2][0] + dL_dRt[0][2]) + 2.0f * y * (dL_dRt[1][2] + dL_dRt[2][1]) - 4.0f * z * (dL_dRt[1][1] + dL_dRt[0][0])
+        2.0f * qz * (dL_dRt[0][1] - dL_dRt[1][0]) + 2.0f * qy * (dL_dRt[2][0] - dL_dRt[0][2]) + 2.0f * qx * (dL_dRt[1][2] - dL_dRt[2][1]),
+        2.0f * qy * (dL_dRt[1][0] + dL_dRt[0][1]) + 2.0f * qz * (dL_dRt[2][0] + dL_dRt[0][2]) + 2.0f * qw * (dL_dRt[1][2] - dL_dRt[2][1]) - 4.0f * qx * (dL_dRt[2][2] + dL_dRt[1][1]),
+        2.0f * qx * (dL_dRt[1][0] + dL_dRt[0][1]) + 2.0f * qw * (dL_dRt[2][0] - dL_dRt[0][2]) + 2.0f * qz * (dL_dRt[1][2] + dL_dRt[2][1]) - 4.0f * qy * (dL_dRt[2][2] + dL_dRt[0][0]),
+        2.0f * qw * (dL_dRt[0][1] - dL_dRt[1][0]) + 2.0f * qx * (dL_dRt[2][0] + dL_dRt[0][2]) + 2.0f * qy * (dL_dRt[1][2] + dL_dRt[2][1]) - 4.0f * qz * (dL_dRt[1][1] + dL_dRt[0][0])
     );
 
     // Backprop through normalize(q)
     float4 q_raw = q[idx];
     float inv_norm = 1.0f / sqrtf(q_raw.x * q_raw.x + q_raw.y * q_raw.y + q_raw.z * q_raw.z + q_raw.w * q_raw.w);
-    float4 qhat = make_float4(r, x, y, z); // normalized, float4 (w,x,y,z)
+    float4 qhat = make_float4(qw, qx, qy, qz); // normalized, float4 (w,x,y,z)
     float dot = qhat.x * dq.x + qhat.y * dq.y + qhat.z * dq.z + qhat.w * dq.w;
     q_grad[idx] = make_float4(
         inv_norm * (dq.x - qhat.x * dot),

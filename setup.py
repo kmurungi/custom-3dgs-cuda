@@ -35,6 +35,9 @@ setup(
                 "csrc/forward/projection.cu",
                 "csrc/forward/rasterize.cu",
                 "csrc/forward/SH.cu",
+                "csrc/backward/rasterize_backward.cu",
+                "csrc/backward/projection_backward.cu",
+                "csrc/backward/delight_backward.cu",
             ],
             include_dirs=include_dirs,
         )

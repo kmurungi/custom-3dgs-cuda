@@ -9,7 +9,6 @@ from tqdm import tqdm
 
 from gaussian_splatting.rasterizer.rasterize import rasterize
 from gaussian_splatting.utils.dataloader import load_colmap
-from gaussian_splatting.utils.loss import calculate_loss
 from gaussian_splatting.utils.optim import setup_optimizer
 from gaussian_splatting.utils.saveweights import save_weights
 from gaussian_splatting.utils.adc import (
@@ -87,7 +86,7 @@ def train(args):
 
             optimizer.zero_grad(set_to_none=True)
             rendered_img = rasterize(gaussians, image)
-            loss = calculate_loss(gt_img, rendered_img)
+            loss = t.mean(t.abs(gt_img - rendered_img))  # plain L1 for first training loop
             loss.backward()
             accumulate_densification_stats(gaussians)
             optimizer.step()
