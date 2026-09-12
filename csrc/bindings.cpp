@@ -99,7 +99,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> backwards
     );
 }
 
-std::tuple<torch::Tensor, torch::Tensor> backwards_SH(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> backwards_SH(
     const torch::Tensor colors_grad,
     const torch::Tensor mu,
     const torch::Tensor albedo,

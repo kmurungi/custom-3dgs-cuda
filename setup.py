@@ -5,7 +5,7 @@ from pathlib import Path
 # Required on Windows when vcvars is already activated (PyTorch CUDA extensions).
 os.environ.setdefault("DISTUTILS_USE_SDK", "1")
 
-from setuptools import setup
+from setuptools import find_packages, setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 ROOT = Path(__file__).resolve().parent
@@ -27,6 +27,7 @@ for candidate in glm_candidates:
 
 setup(
     name="custom_rasterizer_cuda",
+    packages=find_packages(include=["gaussian_splatting", "gaussian_splatting.*"]),
     ext_modules=[
         CUDAExtension(
             name="custom_rasterizer_cuda",

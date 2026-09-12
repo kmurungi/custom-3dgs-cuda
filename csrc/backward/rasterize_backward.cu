@@ -16,7 +16,7 @@ __global__ void backward_rasterization(
     const float* __restrict__ final_T,
     const int* __restrict__ n_contrib,
 
-    // global memory
+    // global memory — dl_cov2d is ∂L/∂Σ₂ (not ∂L/∂conic)
     float2* __restrict__ dl_mean2d,
     float3* __restrict__ dl_cov2d,
     float3* __restrict__ dl_colors,
@@ -52,7 +52,7 @@ __global__ void backward_rasterization(
     __shared__ float s_opacity[BLOCK_SIZE];
 
     __shared__ float2 s_dl_means[BLOCK_SIZE];
-    __shared__ float3 s_dl_conics[BLOCK_SIZE];
+    __shared__ float3 s_dl_conics[BLOCK_SIZE]; // accumulate ∂L/∂conic, convert on flush
     __shared__ float3 s_dl_colors[BLOCK_SIZE];
     __shared__ float s_dl_opacity[BLOCK_SIZE];
 
@@ -75,20 +75,29 @@ __global__ void backward_rasterization(
         // pull from GLOBAL via sorted gaussian ids
         if (thread_id_1d < to_load) {
             int gaussian_id = sorted_ids[batch_start + thread_id_1d];
-            s_ids[thread_id_1d] = gaussian_id;
-            s_means[thread_id_1d] = mean_2d[gaussian_id];
+            // OOB / corrupt ids: load zeros so flush can safely skip
+            if (gaussian_id < 0 || gaussian_id >= num_gaussians) {
+                s_ids[thread_id_1d] = -1;
+                s_means[thread_id_1d] = make_float2(0.0f, 0.0f);
+                s_conics[thread_id_1d] = make_float3(0.0f, 0.0f, 0.0f);
+                s_colors[thread_id_1d] = make_float3(0.0f, 0.0f, 0.0f);
+                s_opacity[thread_id_1d] = 0.0f;
+            } else {
+                s_ids[thread_id_1d] = gaussian_id;
+                s_means[thread_id_1d] = mean_2d[gaussian_id];
 
-            float3 cov = cov_2d[gaussian_id];
-            float det = cov.x * cov.z - cov.y * cov.y;
-            float det_inv = (det > 0.0f) ? (1.0f / det) : 0.0f;
-            s_conics[thread_id_1d] = make_float3(
-                cov.z * det_inv,
-                -cov.y * det_inv,
-                cov.x * det_inv
-            );
+                float3 cov = cov_2d[gaussian_id];
+                float det = cov.x * cov.z - cov.y * cov.y;
+                float det_inv = (det > 0.0f) ? (1.0f / det) : 0.0f;
+                s_conics[thread_id_1d] = make_float3(
+                    cov.z * det_inv,
+                    -cov.y * det_inv,
+                    cov.x * det_inv
+                );
 
-            s_colors[thread_id_1d] = colors[gaussian_id];
-            s_opacity[thread_id_1d] = alpha[gaussian_id];
+                s_colors[thread_id_1d] = colors[gaussian_id];
+                s_opacity[thread_id_1d] = alpha[gaussian_id];
+            }
 
             // zero shared grad buffers for this batch slot
             s_dl_means[thread_id_1d] = make_float2(0.0f, 0.0f);
@@ -99,12 +108,13 @@ __global__ void backward_rasterization(
 
         __syncthreads();
 
-        // back-to-front gradient calculation loop for each gaussian in this batch 
+        // back-to-front gradient calculation loop for each gaussian in this batch
         if (!done) {
             for (int j = 0; j < to_load; j++) {
                 int k = to_load - 1 - j;
-                int contributor = K - progress - to_load + k + 1; 
+                int contributor = K - progress - to_load + k + 1;
                 if (contributor > last_contributor) continue;
+                if (s_ids[k] < 0) continue;
 
                 float2 mean = s_means[k];
                 float dx = (float)px - mean.x;
@@ -118,12 +128,14 @@ __global__ void backward_rasterization(
 
                 float opac = s_opacity[k];
                 float G = __expf(power);
-                float alpha_i = fminf(0.99f, opac * G);
+                float alpha_raw = opac * G;
+                float alpha_i = fminf(0.99f, alpha_raw);
                 if (alpha_i < (1.0f / 255.0f)) continue;
 
                 // unwind transmittance to just before this Gaussian
+                // forward caps α at 0.99 so denom ≥ 0.01; ε keeps this robust if α→1
                 float one_minus_alpha = 1.0f - alpha_i;
-                float T_before = T / one_minus_alpha;
+                float T_before = T / fmaxf(one_minus_alpha, 1e-4f);
 
                 float3 c = s_colors[k];
 
@@ -139,21 +151,27 @@ __global__ void backward_rasterization(
                      (c.y - accum_rec.y) * dL_dC.y +
                      (c.z - accum_rec.z) * dL_dC.z) * T_before;
 
-                float dL_dopacity = G * dL_dalpha;
-                float dL_dpower = alpha_i * dL_dalpha;
+                // α = min(0.99, o·G): when clamped, ∂α/∂o = ∂α/∂G = 0
+                float dL_dopacity = 0.0f;
+                float dL_dpower = 0.0f;
+                if (alpha_raw < 0.99f) {
+                    dL_dopacity = G * dL_dalpha;
+                    dL_dpower = alpha_i * dL_dalpha; // = o·G·dL_dalpha
+                }
 
                 float2 dL_dmean = make_float2(
                     dL_dpower * (conic.x * dx + conic.y * dy),
                     dL_dpower * (conic.y * dx + conic.z * dy)
                 );
 
+                // ∂L/∂conic (full off-diagonal; halved when converting to ∂L/∂Σ₂)
                 float3 dL_dconic = make_float3(
                     -0.5f * dL_dpower * dx * dx,
                     -dL_dpower * dx * dy,
                     -0.5f * dL_dpower * dy * dy
                 );
 
-                //accumulate into shared slot k
+                // accumulate into shared slot k
                 atomicAdd(&s_dl_means[k].x, dL_dmean.x);
                 atomicAdd(&s_dl_means[k].y, dL_dmean.y);
 
@@ -167,7 +185,7 @@ __global__ void backward_rasterization(
 
                 atomicAdd(&s_dl_opacity[k], dL_dopacity);
 
-                // update reconstructed background color + T for nextb farther gaussian
+                // update reconstructed background color + T for next farther gaussian
                 accum_rec.x = alpha_i * c.x + one_minus_alpha * accum_rec.x;
                 accum_rec.y = alpha_i * c.y + one_minus_alpha * accum_rec.y;
                 accum_rec.z = alpha_i * c.z + one_minus_alpha * accum_rec.z;
@@ -182,21 +200,34 @@ __global__ void backward_rasterization(
 
         __syncthreads();
 
-        // flush shared batch grads -> global 
+        // flush shared batch grads -> global
         if (thread_id_1d < to_load) {
             int gid = s_ids[thread_id_1d];
-            atomicAdd(&dl_mean2d[gid].x, s_dl_means[thread_id_1d].x);
-            atomicAdd(&dl_mean2d[gid].y, s_dl_means[thread_id_1d].y);
+            if (gid >= 0 && gid < num_gaussians) {
+                atomicAdd(&dl_mean2d[gid].x, s_dl_means[thread_id_1d].x);
+                atomicAdd(&dl_mean2d[gid].y, s_dl_means[thread_id_1d].y);
 
-            atomicAdd(&dl_cov2d[gid].x, s_dl_conics[thread_id_1d].x);
-            atomicAdd(&dl_cov2d[gid].y, s_dl_conics[thread_id_1d].y);
-            atomicAdd(&dl_cov2d[gid].z, s_dl_conics[thread_id_1d].z);
+                // C1: conic = Σ₂⁻¹ → ∂L/∂Σ₂ = -V (∂L/∂V) V
+                // Off-diagonal of ∂L/∂V uses half of packed ∂L/∂conic.y (symmetric Frobenius).
+                float3 conic = s_conics[thread_id_1d];
+                float3 g = s_dl_conics[thread_id_1d];
+                float vx = conic.x, vy = conic.y, vz = conic.z;
+                float gx = g.x, gy = 0.5f * g.y, gz = g.z;
+                float3 dL_dcov = make_float3(
+                    -(vx * vx * gx + 2.0f * vx * vy * gy + vy * vy * gz),
+                    -2.0f * (vx * vy * gx + (vx * vz + vy * vy) * gy + vy * vz * gz),
+                    -(vy * vy * gx + 2.0f * vy * vz * gy + vz * vz * gz)
+                );
+                atomicAdd(&dl_cov2d[gid].x, dL_dcov.x);
+                atomicAdd(&dl_cov2d[gid].y, dL_dcov.y);
+                atomicAdd(&dl_cov2d[gid].z, dL_dcov.z);
 
-            atomicAdd(&dl_colors[gid].x, s_dl_colors[thread_id_1d].x);
-            atomicAdd(&dl_colors[gid].y, s_dl_colors[thread_id_1d].y);
-            atomicAdd(&dl_colors[gid].z, s_dl_colors[thread_id_1d].z);
+                atomicAdd(&dl_colors[gid].x, s_dl_colors[thread_id_1d].x);
+                atomicAdd(&dl_colors[gid].y, s_dl_colors[thread_id_1d].y);
+                atomicAdd(&dl_colors[gid].z, s_dl_colors[thread_id_1d].z);
 
-            atomicAdd(&dl_alpha[gid], s_dl_opacity[thread_id_1d]);
+                atomicAdd(&dl_alpha[gid], s_dl_opacity[thread_id_1d]);
+            }
         }
 
         if (__syncthreads_count(done) == BLOCK_SIZE) break;
@@ -219,6 +250,37 @@ launch_backward_rasterization(
     int height,
     int width
 ){
+    TORCH_CHECK(grad_output.is_cuda(), "grad_output must be a CUDA tensor");
+    TORCH_CHECK(mean_2d.is_cuda(), "mean_2d must be a CUDA tensor");
+    TORCH_CHECK(cov_2d.is_cuda(), "cov_2d must be a CUDA tensor");
+    TORCH_CHECK(colors.is_cuda(), "colors must be a CUDA tensor");
+    TORCH_CHECK(alpha.is_cuda(), "alpha must be a CUDA tensor");
+    TORCH_CHECK(sorted_ids.is_cuda(), "sorted_ids must be a CUDA tensor");
+    TORCH_CHECK(tile_ranges.is_cuda(), "tile_ranges must be a CUDA tensor");
+    TORCH_CHECK(final_T.is_cuda(), "final_T must be a CUDA tensor");
+    TORCH_CHECK(n_contrib.is_cuda(), "n_contrib must be a CUDA tensor");
+
+    TORCH_CHECK(grad_output.is_contiguous(), "grad_output must be contiguous");
+    TORCH_CHECK(mean_2d.is_contiguous(), "mean_2d must be contiguous");
+    TORCH_CHECK(cov_2d.is_contiguous(), "cov_2d must be contiguous");
+    TORCH_CHECK(colors.is_contiguous(), "colors must be contiguous");
+    TORCH_CHECK(alpha.is_contiguous(), "alpha must be contiguous");
+    TORCH_CHECK(sorted_ids.is_contiguous(), "sorted_ids must be contiguous");
+    TORCH_CHECK(tile_ranges.is_contiguous(), "tile_ranges must be contiguous");
+    TORCH_CHECK(final_T.is_contiguous(), "final_T must be contiguous");
+    TORCH_CHECK(n_contrib.is_contiguous(), "n_contrib must be contiguous");
+
+    TORCH_CHECK(mean_2d.dim() == 2 && mean_2d.size(0) == num_gaussians && mean_2d.size(1) == 2,
+                "mean_2d must be [N, 2]");
+    TORCH_CHECK(cov_2d.dim() == 2 && cov_2d.size(0) == num_gaussians && cov_2d.size(1) == 3,
+                "cov_2d must be [N, 3]");
+    TORCH_CHECK(colors.dim() == 2 && colors.size(0) == num_gaussians && colors.size(1) == 3,
+                "colors must be [N, 3]");
+    TORCH_CHECK(alpha.numel() == num_gaussians, "alpha must have N elements");
+    TORCH_CHECK(final_T.numel() == height * width, "final_T must have H*W elements");
+    TORCH_CHECK(n_contrib.numel() == height * width, "n_contrib must have H*W elements");
+    TORCH_CHECK(grad_output.numel() == height * width * 3, "grad_output must have H*W*3 elements");
+
     constexpr int TILE_SIZE = 16;
     const int tiles_x = (width + TILE_SIZE - 1) / TILE_SIZE;
     const int tiles_y = (height + TILE_SIZE - 1) / TILE_SIZE;

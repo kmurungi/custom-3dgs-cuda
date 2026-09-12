@@ -72,24 +72,17 @@ __global__ void spherical_harmonics_kernel(
     glm::vec3 dir = mu_world - camera_world; 
     glm::vec3 direction = glm::normalize(dir);
 
-    glm::vec3 base_albedo = a_coeff * SH_C0; 
-    
-    /*
-    ILLUMINATION CALCULATION
-    */
-    
+    // Inria 3DGS DC: RGB = 0.5 + SH_C0 * f_dc (+ higher-order bands)
     float Y[15];
     compute_sh_basis_15(direction.x, direction.y, direction.z, Y);
-  
-    glm::vec3 illumination(0.0f);
+
+    glm::vec3 final_rgb = 0.5f + SH_C0 * a_coeff;
     for (int k = 0; k < 15; ++k) {
-        illumination.x += Y[k] * i_coeff_ptr[k * 3 + 0];
-        illumination.y += Y[k] * i_coeff_ptr[k * 3 + 1];
-        illumination.z += Y[k] * i_coeff_ptr[k * 3 + 2];
+        final_rgb.x += Y[k] * i_coeff_ptr[k * 3 + 0];
+        final_rgb.y += Y[k] * i_coeff_ptr[k * 3 + 1];
+        final_rgb.z += Y[k] * i_coeff_ptr[k * 3 + 2];
     }
 
-    glm::vec3 final_rgb = base_albedo * illumination;
-    
     colors_ptr[idx] = make_float3(
         fminf(fmaxf(final_rgb.x, 0.0f), 1.0f),
         fminf(fmaxf(final_rgb.y, 0.0f), 1.0f),
@@ -119,7 +112,8 @@ torch::Tensor launch_spherical_harmonics_kernel(
     TORCH_CHECK(illumination_coeff.is_contiguous(), "illumination_coeff must be contiguous in memory");
     TORCH_CHECK(camera_position.numel() >= 3, "camera_position must have 3 elements");
 
-    const float* cam_ptr = camera_position.data_ptr<float>();
+    auto cam_cpu = camera_position.cpu().contiguous();
+    const float* cam_ptr = cam_cpu.data_ptr<float>();
     float3 camera_position_ = make_float3(cam_ptr[0], cam_ptr[1], cam_ptr[2]);
     const float3* mu_world_ptr = reinterpret_cast<const float3*>(mu_world.data_ptr<float>()); 
     const float3* albedo_coeff_ptr = reinterpret_cast<const float3*>(albedo_coeff.data_ptr<float>()); 

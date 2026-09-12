@@ -40,6 +40,7 @@ __global__ void backward_projection(
     if (mu_cam.z <= 0.2f) return;
     float z = mu_cam.z;
     float z2 = z * z;
+    float z3 = z2 * z;
     float dx = mean_2d_grad[idx].x;
     float dy = mean_2d_grad[idx].y;
     glm::vec3 dmu_cam(
@@ -47,30 +48,25 @@ __global__ void backward_projection(
         (fy / z) * dy,
         (-fx * mu_cam.x / z2) * dx + (-fy * mu_cam.y / z2) * dy
     );
-    glm::vec3 dmu_world = glm::transpose(R_cam) * dmu_cam;
-    mu_grad[idx] = make_float3(dmu_world.x, dmu_world.y, dmu_world.z); 
-    
+
     // -------------------------------------------------------------------------
     // 2. COVARIANCE BACKWARDS PROJECTIONS
     // -------------------------------------------------------------------------
 
-    // construct gradient matrix     
     float a = cov_2d_grad[idx].x;
     float b = cov_2d_grad[idx].y;
-    float c = cov_2d_grad[idx].z;  
+    float c = cov_2d_grad[idx].z;
     glm::mat2 dl_d2d(
-        a, 0.5f * b, 
+        a, 0.5f * b,
         0.5f * b, c
     );
 
-    //construct Jacobian (matches forward 2x3 J)
     glm::mat3x2 J(
         fx / z,  0.0f,
         0.0f,    fy / z,
         -(fx * mu_cam.x) / z2,  -(fy * mu_cam.y) / z2
     );
 
-    // construct S and R matrices (same as forward)
     float sx = expf(s[idx].x);
     float sy = expf(s[idx].y);
     float sz = expf(s[idx].z);
@@ -83,10 +79,12 @@ __global__ void backward_projection(
     glm::quat quat = glm::normalize(glm::quat(q[idx].x, q[idx].y, q[idx].z, q[idx].w));
     glm::mat3 R = glm::toMat3(quat);
     glm::mat3 M = R * S;
+    glm::mat3 Sigma_world = M * glm::transpose(M);
+    glm::mat3 Sigma_cam = R_cam * Sigma_world * glm::transpose(R_cam);
 
-    // chain rule
-    glm::mat3 dl_dcam = glm::transpose(J) * dl_d2d * J; // to camera space
-    glm::mat3 dl_dworld = glm::transpose(R_cam) * dl_dcam * R_cam; // to world space
+    // chain rule through Σ₂ = J Σ_cam Jᵀ
+    glm::mat3 dl_dcam = glm::transpose(J) * dl_d2d * J;
+    glm::mat3 dl_dworld = glm::transpose(R_cam) * dl_dcam * R_cam;
     glm::mat3 dl_dM = 2.0f * dl_dworld * M;
     glm::mat3 dl_dR = dl_dM * S;
     glm::mat3 dl_dS = glm::transpose(R) * dl_dM;
@@ -97,7 +95,23 @@ __global__ void backward_projection(
         dl_dS[2][2] * sz
     );
 
-    
+    // ∂Σ₂/∂μ via J(μ_cam): dL/dJ = 2 G J Σ_cam  (G = dl_d2d symmetric)
+    glm::mat3x2 dL_dJ = 2.0f * dl_d2d * J * Sigma_cam;
+    // GLM mat3x2: [col][row] — col0=(J00,J10), col1=(J01,J11), col2=(J02,J12)
+    float dL_dJ00 = dL_dJ[0][0];
+    float dL_dJ11 = dL_dJ[1][1];
+    float dL_dJ02 = dL_dJ[2][0];
+    float dL_dJ12 = dL_dJ[2][1];
+    dmu_cam.x += dL_dJ02 * (-fx / z2);
+    dmu_cam.y += dL_dJ12 * (-fy / z2);
+    dmu_cam.z += dL_dJ00 * (-fx / z2)
+               + dL_dJ11 * (-fy / z2)
+               + dL_dJ02 * (2.0f * fx * mu_cam.x / z3)
+               + dL_dJ12 * (2.0f * fy * mu_cam.y / z3);
+
+    glm::vec3 dmu_world = glm::transpose(R_cam) * dmu_cam;
+    mu_grad[idx] = make_float3(dmu_world.x, dmu_world.y, dmu_world.z);
+
     glm::mat3 dL_dRt = glm::transpose(dl_dR);
     float qw = quat.w;
     float qx = quat.x;
@@ -112,14 +126,14 @@ __global__ void backward_projection(
 
     // Backprop through normalize(q)
     float4 q_raw = q[idx];
-    float inv_norm = 1.0f / sqrtf(q_raw.x * q_raw.x + q_raw.y * q_raw.y + q_raw.z * q_raw.z + q_raw.w * q_raw.w);
+    float inv_norm = rsqrtf(q_raw.x * q_raw.x + q_raw.y * q_raw.y + q_raw.z * q_raw.z + q_raw.w * q_raw.w + 1e-8f);
     float4 qhat = make_float4(qw, qx, qy, qz); // normalized, float4 (w,x,y,z)
-    float dot = qhat.x * dq.x + qhat.y * dq.y + qhat.z * dq.z + qhat.w * dq.w;
+    float qdot = qhat.x * dq.x + qhat.y * dq.y + qhat.z * dq.z + qhat.w * dq.w;
     q_grad[idx] = make_float4(
-        inv_norm * (dq.x - qhat.x * dot),
-        inv_norm * (dq.y - qhat.y * dot),
-        inv_norm * (dq.z - qhat.z * dot),
-        inv_norm * (dq.w - qhat.w * dot)
+        inv_norm * (dq.x - qhat.x * qdot),
+        inv_norm * (dq.y - qhat.y * qdot),
+        inv_norm * (dq.z - qhat.z * qdot),
+        inv_norm * (dq.w - qhat.w * qdot)
     );
 
 }
@@ -135,6 +149,14 @@ launch_backward_projection(
     const torch::Tensor camera_translation,
     float fx, float fy, float cx, float cy
 ){
+    TORCH_CHECK(mean_2d_grad.is_cuda() && mean_2d_grad.is_contiguous(), "mean_2d_grad must be CUDA contiguous");
+    TORCH_CHECK(cov_2d_grad.is_cuda() && cov_2d_grad.is_contiguous(), "cov_2d_grad must be CUDA contiguous");
+    TORCH_CHECK(mu.is_cuda() && mu.is_contiguous(), "mu must be CUDA contiguous");
+    TORCH_CHECK(q.is_cuda() && q.is_contiguous(), "q must be CUDA contiguous");
+    TORCH_CHECK(s.is_cuda() && s.is_contiguous(), "s must be CUDA contiguous");
+    TORCH_CHECK(camera_rotation.is_cuda() && camera_rotation.is_contiguous(), "camera_rotation must be CUDA contiguous");
+    TORCH_CHECK(camera_translation.is_cuda() && camera_translation.is_contiguous(), "camera_translation must be CUDA contiguous");
+
     int num_gaussians = mu.size(0);
     int numThreadsPerBlock = 256;
     int numBlocks = (num_gaussians + numThreadsPerBlock - 1) / numThreadsPerBlock;

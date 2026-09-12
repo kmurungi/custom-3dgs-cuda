@@ -1,29 +1,34 @@
 import argparse
 from pathlib import Path
+import math
 import random
+import sys
+
+# Allow `python scripts/train.py` without installing the Python package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 import torch as t
 from PIL import Image
 from tqdm import tqdm
 
-from gaussian_splatting.rasterizer.rasterize import rasterize
-from gaussian_splatting.utils.dataloader import load_colmap
-from gaussian_splatting.utils.optim import setup_optimizer
+from gaussian_splatting.rasterizer.rasterize import RasterizeFunction, rasterize
+from gaussian_splatting.utils.dataloader import load_colmap, parse_colmap
+from gaussian_splatting.utils.optim import (
+    get_mu_lr,
+    get_positional_lr_scheduler,
+    get_scale_lr,
+    setup_optimizer,
+)
 from gaussian_splatting.utils.saveweights import save_weights
 from gaussian_splatting.utils.adc import (
     accumulate_densification_stats,
     adaptive_density_control,
+    clamp_log_scales,
     ensure_densification_state,
+    scene_extent_from_cameras,
+    update_max_radii2d,
 )
-
-
-def is_refinement_iteration(i: int) -> bool:
-    return 500 <= i <= 15000 and i % 100 == 0
-
-
-def is_opacity_reset_iteration(i: int) -> bool:
-    return 500 <= i <= 15000 and i > 0 and i % 3000 == 0
 
 
 def load_gt_image(image_path, device: t.device) -> t.Tensor:
@@ -38,72 +43,218 @@ def enable_gaussian_grads(gaussians) -> None:
         tensor.requires_grad_(True)
 
 
+def _workspace_ready(workspace: Path) -> bool:
+    return (workspace / "undistorted" / "sparse").is_dir() and (
+        workspace / "undistorted" / "images"
+    ).is_dir()
+
+
+def load_scene(dataset: str | Path, colmap_workspace: str | Path | None = None):
+    """Load gaussians/cameras from a precomputed COLMAP workspace, or run COLMAP."""
+    dataset_path = Path(dataset).expanduser().resolve()
+    workspace = (
+        Path(colmap_workspace).expanduser().resolve()
+        if colmap_workspace is not None
+        else dataset_path.parent / f"{dataset_path.name}_colmap"
+    )
+
+    if colmap_workspace is not None or _workspace_ready(workspace):
+        if not _workspace_ready(workspace):
+            raise FileNotFoundError(
+                f"COLMAP workspace incomplete: {workspace}. "
+                "Expected undistorted/sparse and undistorted/images."
+            )
+        sparse = workspace / "undistorted" / "sparse"
+        images = workspace / "undistorted" / "images"
+        print(f"[train] Using precomputed COLMAP: {workspace}", flush=True)
+        return parse_colmap(sparse, images)
+
+    print(f"[train] No complete COLMAP workspace at {workspace}; running COLMAP.", flush=True)
+    return load_colmap(dataset_path)
+
+
 def train(args):
     """
     Training loop Custom Gaussian Splatting
     """
     device = t.device("cuda" if t.cuda.is_available() else "cpu")
 
-    gaussians, cameras = load_colmap(args.dataset)
+    gaussians, cameras = load_scene(args.dataset, args.colmap_workspace)
     # Move trainable params to device and enable grads
     for name in ("mu", "q", "s", "alpha", "A", "k_j"):
         setattr(gaussians, name, getattr(gaussians, name).to(device))
+    cameras.R = cameras.R.to(device)
+    cameras.t = cameras.t.to(device)
     enable_gaussian_grads(gaussians)
 
     images = cameras.sample_camera_view()
     for view in images:
         for key in ("R", "T", "fx", "fy", "cx", "cy"):
             view[key] = view[key].to(device)
+        if view.get("image_path") is None:
+            raise RuntimeError(
+                "Camera view is missing image_path. "
+                "Ensure load_colmap/parse_colmap attached image paths."
+            )
+        view["rgb"] = load_gt_image(view["image_path"], device)
+        view["height"], view["width"] = int(view["rgb"].shape[0]), int(view["rgb"].shape[1])
 
+    # Fixed scene extent from camera centers (never recomputed from active points).
+    fixed_scene_extent = scene_extent_from_cameras(cameras)
+    print(f"[train] Fixed scene extent (cameras): {fixed_scene_extent:.4f}", flush=True)
+    print(f"[train] Initial Gaussians: {gaussians.N}", flush=True)
+    print(
+        f"[train] Initial opacity (activated): min={float(t.sigmoid(gaussians.alpha).min()):.4f} "
+        f"mean={float(t.sigmoid(gaussians.alpha).mean()):.4f} "
+        f"(logits; expect sigmoid >= 0.1)",
+        flush=True,
+    )
+    with t.no_grad():
+        init_scales = t.exp(gaussians.s)
+        print(
+            f"[train] Initial scale (activated): mean={float(init_scales.mean()):.5f} "
+            f"max={float(init_scales.max()):.5f}",
+            flush=True,
+        )
+
+    lr_init = 1.6e-4 * fixed_scene_extent
+    lr_final = 1.6e-6 * fixed_scene_extent
+    scale_lr_init = 5e-3
+    scale_lr_final = 5e-5
     learning_rates = {
-        "mu": args.lr * 10.0,
-        "q": args.lr,
-        "s": args.lr,
-        "alpha": args.lr,
-        "A": args.lr,
-        "k_j": args.lr,
+        "mu": lr_init,
+        "q": 1e-3,
+        "s": scale_lr_init,
+        "alpha": 5e-2,
+        "A": 2.5e-3,
+        "k_j": 6.25e-4,
     }
     optimizer = setup_optimizer(gaussians, lrs=learning_rates, lr=args.lr)
     ensure_densification_state(gaussians)
+    clamp_log_scales(gaussians, fixed_scene_extent)
+
+    # Typical image width for screen-space prune threshold.
+    image_width = max(int(v["width"]) for v in images)
+    max_screen_size = image_width * 0.1
 
     checkpoint_every = max(1, args.epochs // max(1, args.checkpoints))
-    total_iterations = args.epochs * len(images)
+    TOTAL_STEPS = args.epochs * len(images)
     iteration = 0
-    pbar = tqdm(total=total_iterations, desc="Training 3DGS")
+    stats_window = {"cloned": 0, "split": 0, "pruned": 0}
+    pbar = tqdm(total=TOTAL_STEPS, desc="Training 3DGS")
+    densify_until = int(0.7 * TOTAL_STEPS)
+    mu_scheduler = get_positional_lr_scheduler(
+        optimizer,
+        lr_init=lr_init,
+        lr_final=lr_final,
+        scale_lr_init=scale_lr_init,
+        scale_lr_final=scale_lr_final,
+        lr_delay_mult=0.01,
+        max_steps=TOTAL_STEPS,
+    )
+    print(
+        f"[train] TOTAL_STEPS={TOTAL_STEPS} | densify while iteration < {densify_until} "
+        f"(70% cutoff) | mu LR {lr_init:.3e} -> {lr_final:.3e} | "
+        f"scale LR {scale_lr_init:.3e} -> {scale_lr_final:.3e}",
+        flush=True,
+    )
 
     for epoch in range(args.epochs):
         random.shuffle(images)
         for image in images:
-            if image.get("image_path") is None:
-                raise RuntimeError(
-                    "Camera view is missing image_path. "
-                    "Ensure load_colmap/parse_colmap attached image paths."
-                )
-
-            gt_img = load_gt_image(image["image_path"], device)
-            image["height"], image["width"] = int(gt_img.shape[0]), int(gt_img.shape[1])
-            image["rgb"] = gt_img
+            gt_img = image["rgb"]
 
             optimizer.zero_grad(set_to_none=True)
             rendered_img = rasterize(gaussians, image)
+            update_max_radii2d(gaussians, RasterizeFunction.last_radii2d)
             loss = t.mean(t.abs(gt_img - rendered_img))  # plain L1 for first training loop
             loss.backward()
-            accumulate_densification_stats(gaussians)
-            optimizer.step()
+            mean2d_grad = RasterizeFunction.last_mean2d_grad
+            img_h, img_w = int(image["height"]), int(image["width"])
 
-            if is_refinement_iteration(iteration):
-                gaussians, optimizer = adaptive_density_control(
+            # Stop structural edits past 70% of total steps
+            allow_densify = iteration < densify_until
+            # Opacity reset every 3,000 steps — only while densifying
+            do_reset = (iteration % 3000 == 0) and (iteration > 0) and allow_densify
+
+            if iteration % 100 == 0:
+                if mean2d_grad is None:
+                    print(
+                        f"[Step {iteration}] means2d.grad=None "
+                        "(backward did not populate densification grads)",
+                        flush=True,
+                    )
+                else:
+                    gxy = mean2d_grad[:, :2].detach()
+                    gxy_px = gxy * t.tensor(
+                        [img_w / 2.0, img_h / 2.0], device=gxy.device, dtype=gxy.dtype
+                    )
+                    gn = t.norm(gxy, dim=-1)
+                    gn_px = t.norm(gxy_px, dim=-1)
+                    print(
+                        f"[Step {iteration}] means2d.grad: "
+                        f"shape={tuple(mean2d_grad.shape)} "
+                        f"raw max={float(gn.max()):.3e} mean={float(gn.mean()):.3e} | "
+                        f"pixel-scaled max={float(gn_px.max()):.3e} "
+                        f"mean={float(gn_px.mean()):.3e} "
+                        f"nz={int((gn > 0).sum())}/{gn.numel()} "
+                        f"(H={img_h}, W={img_w}) allow_densify={allow_densify} "
+                        f"mu_lr={get_mu_lr(optimizer):.3e}",
+                        flush=True,
+                    )
+
+            accumulate_densification_stats(
+                gaussians,
+                mean2d_grad=mean2d_grad,
+                width=img_w,
+                height=img_h,
+            )
+            optimizer.step()
+            mu_scheduler.step()
+            # Opacity is logits: keep activated opacity in ~[1e-4, 0.99]
+            gaussians.alpha.data.clamp_(
+                math.log(1e-4 / (1.0 - 1e-4)),
+                math.log(0.99 / (1.0 - 0.99)),
+            )
+            clamp_log_scales(gaussians, fixed_scene_extent)
+
+            if iteration % 100 == 0:
+                gaussians, optimizer, stats = adaptive_density_control(
                     gaussians,
                     optimizer,
-                    reset_opacity=is_opacity_reset_iteration(iteration),
+                    grad_threshold=0.00005,
+                    percent_dense=0.01,
+                    min_opacity=0.01,
+                    scene_extent=fixed_scene_extent,
+                    max_screen_size=max_screen_size,
+                    reset_opacity=do_reset,
+                    max_gaussians=800_000,
+                    allow_densify=allow_densify,
                 )
+                for key in stats_window:
+                    stats_window[key] += stats[key]
 
             iteration += 1
+            current_mu_lr = get_mu_lr(optimizer)
+            current_scale_lr = get_scale_lr(optimizer)
+            if iteration % 500 == 0:
+                print(
+                    f"[Step {iteration}] Active Gaussians: {gaussians.N} | "
+                    f"Cloned: {stats_window['cloned']} | "
+                    f"Split: {stats_window['split']} | "
+                    f"Pruned: {stats_window['pruned']} | "
+                    f"mu_lr={current_mu_lr:.3e} | scale_lr={current_scale_lr:.3e}",
+                    flush=True,
+                )
+                stats_window = {"cloned": 0, "split": 0, "pruned": 0}
+
             pbar.update(1)
             pbar.set_postfix(
                 loss=float(loss.detach()),
                 epoch=epoch,
                 N=gaussians.N,
+                mu_lr=f"{current_mu_lr:.2e}",
+                s_lr=f"{current_scale_lr:.2e}",
             )
 
         if epoch % checkpoint_every == 0:
@@ -118,8 +269,14 @@ def parse_arguments():
         description="3D Gaussian Splatting Training & De-Lighting Engine"
     )
     parser.add_argument("-d", "--dataset", type=str, required=True, help="path for loading data")
+    parser.add_argument(
+        "--colmap-workspace",
+        type=str,
+        default=None,
+        help="precomputed COLMAP workspace (default: reuse <dataset>_colmap if complete)",
+    )
     parser.add_argument("--delight", action="store_true", help="activate delighting")
-    parser.add_argument("--lr", type=float, default=0.001, help="learning rate")
+    parser.add_argument("--lr", type=float, default=0.001, help="learning rate (unused when extent LRs set)")
     parser.add_argument("-e", "--epochs", type=int, default=100, help="epochs")
     parser.add_argument("-o", "--output", type=str, default="./output", help="output folder")
     parser.add_argument("-c", "--checkpoints", type=int, default=5, help="number of checkpoints")

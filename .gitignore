@@ -1,13 +1,100 @@
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.dist-info/
+.eggs/
+dist/
+build/
+*.egg
+*.whl
+.venv/
+venv/
+.env
+.ipynb_checkpoints/
+
+# CUDA / compiled extensions / CMake
+*.pyd
+*.so
+*.dll
+*.lib
+*.exp
+*.obj
+*.o
+*.a
+*.pdb
+*.cubin
+*.fatbin
+*.cudafe*
+*.ptx
+*.module_id
+custom_rasterizer_cuda*.pyd
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+compile_commands.json
+.ninja_deps
+.ninja_log
+
+# Local build helpers (portfolio: keep repo source-only)
+rebuild_cuda.bat
+
+# Notebooks / local scratch
+*.ipynb
+test.ipynb
+tmp/
+temp/
+
+# Training outputs & weights
 output/
+output_*/
 checkpoints/
+checkpoints_*/
 *.pt
 *.pth
 *.ckpt
-test.ipynb
+*.ply
+*.npz
+*.bin
+*.npz.gz
+
+# Logs / experiment trackers
+*.log
+train_*.log
+logs/
+wandb/
+runs/
+tb_logs/
+lightning_logs/
+
+# Datasets & COLMAP workspaces (images / SfM — not source)
 data/
 datasets/
-.ipynb_checkpoints/
 input_data/
 input_data_colmap/
-test.ipynb
+Horse/
+Horse_colmap/
+*_colmap/
+
+# Common image / media dumps
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.mp4
+*.mov
+*.avi
+*.exr
+*.tif
+*.tiff
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

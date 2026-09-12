@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+import math
 import re
 import shutil
 import struct
@@ -39,14 +40,17 @@ class ColmapPaths:
     images: Path
 
 
-def _run(command: list[str]) -> None:
-    """Run a COLMAP command and surface a useful error on failure."""
-    result = subprocess.run(command, capture_output=True, text=True)
+def _run(command: list[str], *, step: str | None = None) -> None:
+    """Run a COLMAP command, streaming its output so progress is visible."""
+    if step is not None:
+        print(f"\n[COLMAP] {step}", flush=True)
+    print(f"[COLMAP] $ {' '.join(command)}", flush=True)
+    # Inherit stdout/stderr so COLMAP progress meters print live.
+    result = subprocess.run(command)
     if result.returncode != 0:
-        details = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(
             f"COLMAP command failed with exit code {result.returncode}: "
-            f"{' '.join(command)}\n{details}"
+            f"{' '.join(command)}"
         )
 
 
@@ -127,6 +131,15 @@ def run_colmap(
     sparse_path.mkdir(parents=True, exist_ok=True)
     undistorted_path.mkdir(parents=True, exist_ok=True)
 
+    n_images = sum(1 for path in image_path.iterdir() if path.is_file())
+    print(
+        f"[COLMAP] Starting reconstruction for {n_images} images\n"
+        f"[COLMAP] Workspace: {workspace}\n"
+        f"[COLMAP] Stages: 1/4 feature_extractor → 2/4 exhaustive_matcher → "
+        f"3/4 mapper → 4/4 image_undistorter",
+        flush=True,
+    )
+
     _run(
         [
             executable,
@@ -138,7 +151,13 @@ def run_colmap(
             "--ImageReader.camera_model",
             camera_model,
         ]
-        + _gpu_args(executable, "feature_extractor", ("FeatureExtraction", "SiftExtraction"), use_gpu)
+        + _gpu_args(
+            executable,
+            "feature_extractor",
+            ("FeatureExtraction", "SiftExtraction"),
+            use_gpu,
+        ),
+        step="1/4 feature_extractor (detecting keypoints per image)",
     )
     _run(
         [
@@ -147,7 +166,13 @@ def run_colmap(
             "--database_path",
             str(database_path),
         ]
-        + _gpu_args(executable, "exhaustive_matcher", ("FeatureMatching", "SiftMatching"), use_gpu)
+        + _gpu_args(
+            executable,
+            "exhaustive_matcher",
+            ("FeatureMatching", "SiftMatching"),
+            use_gpu,
+        ),
+        step="2/4 exhaustive_matcher (matching image pairs; often the slowest)",
     )
     _run(
         [
@@ -159,7 +184,8 @@ def run_colmap(
             str(image_path),
             "--output_path",
             str(sparse_path),
-        ]
+        ],
+        step="3/4 mapper (incremental SfM / sparse reconstruction)",
     )
 
     model_path = sparse_path / "0"
@@ -181,9 +207,11 @@ def run_colmap(
             str(undistorted_path),
             "--output_type",
             "COLMAP",
-        ]
+        ],
+        step="4/4 image_undistorter (writing undistorted images)",
     )
 
+    print(f"[COLMAP] Done. Sparse model: {undistorted_path / 'sparse'}", flush=True)
     return ColmapPaths(
         workspace=workspace,
         database=database_path,
@@ -397,17 +425,26 @@ def _read_points3d(model_dir: Path) -> tuple[t.Tensor, t.Tensor]:
 
 
 def _init_scales(xyz: t.Tensor, k_neighbors: int = 3) -> t.Tensor:
-    """Isotropic scale from mean distance to k nearest neighbors."""
+    """Isotropic log-scale from kNN, hard-capped for fine-surface init.
+
+    Activated scale is ``exp(s)``. Cap at ``min(0.01 * extent, exp(-5))`` so
+    init splats stay small (~0.007 or finer) instead of scene-sized blobs.
+    """
     num_points = xyz.shape[0]
+    extent = float((xyz.max(0).values - xyz.min(0).values).norm().clamp_min(1e-3).item())
+    # Prefer log(0.01 * extent), but never larger than exp(-5) ≈ 0.0067
+    max_scale = min(0.01 * extent, math.exp(-5.0))
+    max_scale = max(max_scale, 1e-7)
+
     if num_points == 1:
-        return t.full((1, 3), 0.01, dtype=t.float32)
+        return t.full((1, 3), math.log(max_scale), dtype=t.float32)
 
     k = min(k_neighbors, num_points - 1)
     distances = t.cdist(xyz, xyz)
     distances.fill_diagonal_(float("inf"))
     nearest, _ = t.topk(distances, k=k, largest=False, dim=1)
-    mean_dist = nearest.mean(dim=1).clamp_min(1e-7)
-    return mean_dist.unsqueeze(1).repeat(1, 3)
+    mean_dist = nearest.mean(dim=1).clamp(max=max_scale).clamp_min(1e-7)
+    return t.log(mean_dist.unsqueeze(1).repeat(1, 3))
 
 
 def parse_colmap(
@@ -467,8 +504,17 @@ def parse_colmap(
     gaussians.q = t.zeros(num_gaussians, 4, dtype=t.float32)
     gaussians.q[:, 0] = 1.0  # identity quaternion (w, x, y, z)
     gaussians.s = _init_scales(xyz)
-    gaussians.alpha = t.full((num_gaussians, 1), 0.1, dtype=t.float32)
-    gaussians.A = rgb
+    # Store opacity as logits; rasterize applies sigmoid so CUDA sees (0, 1).
+    # logit(0.1) ≈ -2.197 → activated opacity 0.1 (survives min_opacity=0.01).
+    init_opacity = 0.1
+    logit = math.log(init_opacity / (1.0 - init_opacity))
+    gaussians.alpha = t.full((num_gaussians, 1), logit, dtype=t.float32)
+    assert float(t.sigmoid(gaussians.alpha).min()) >= 0.1 - 1e-5, (
+        f"Initial activated opacity too low: {float(t.sigmoid(gaussians.alpha).min())}"
+    )
+    # Store DC as Inria f_dc so RGB = 0.5 + SH_C0 * A at init
+    sh_c0 = 0.28209479177387814
+    gaussians.A = (rgb - 0.5) / sh_c0
     gaussians.k_j = t.zeros(num_gaussians, 15, 3, dtype=t.float32)
 
     return gaussians, cameras
