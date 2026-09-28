@@ -51,9 +51,9 @@ def _workspace_ready(workspace: Path) -> bool:
 
 def load_scene(dataset: str | Path, colmap_workspace: str | Path | None = None):
     """Load gaussians/cameras from a precomputed COLMAP workspace, or run COLMAP."""
-    dataset_path = Path(dataset).expanduser().resolve()
+    dataset_path = Path(dataset).expanduser()
     workspace = (
-        Path(colmap_workspace).expanduser().resolve()
+        Path(colmap_workspace).expanduser()
         if colmap_workspace is not None
         else dataset_path.parent / f"{dataset_path.name}_colmap"
     )
@@ -101,21 +101,11 @@ def train(args):
 
     # Fixed scene extent from camera centers (never recomputed from active points).
     fixed_scene_extent = scene_extent_from_cameras(cameras)
-    print(f"[train] Fixed scene extent (cameras): {fixed_scene_extent:.4f}", flush=True)
-    print(f"[train] Initial Gaussians: {gaussians.N}", flush=True)
     print(
-        f"[train] Initial opacity (activated): min={float(t.sigmoid(gaussians.alpha).min()):.4f} "
-        f"mean={float(t.sigmoid(gaussians.alpha).mean()):.4f} "
-        f"(logits; expect sigmoid >= 0.1)",
+        f"[train] Gaussians: {gaussians.N} | views: {len(images)} | "
+        f"scene extent: {fixed_scene_extent:.4f}",
         flush=True,
     )
-    with t.no_grad():
-        init_scales = t.exp(gaussians.s)
-        print(
-            f"[train] Initial scale (activated): mean={float(init_scales.mean()):.5f} "
-            f"max={float(init_scales.max()):.5f}",
-            flush=True,
-        )
 
     lr_init = 1.6e-4 * fixed_scene_extent
     lr_final = 1.6e-6 * fixed_scene_extent
@@ -129,7 +119,7 @@ def train(args):
         "A": 2.5e-3,
         "k_j": 6.25e-4,
     }
-    optimizer = setup_optimizer(gaussians, lrs=learning_rates, lr=args.lr)
+    optimizer = setup_optimizer(gaussians, lrs=learning_rates)
     ensure_densification_state(gaussians)
     clamp_log_scales(gaussians, fixed_scene_extent)
 
@@ -152,12 +142,6 @@ def train(args):
         lr_delay_mult=0.01,
         max_steps=TOTAL_STEPS,
     )
-    print(
-        f"[train] TOTAL_STEPS={TOTAL_STEPS} | densify while iteration < {densify_until} "
-        f"(70% cutoff) | mu LR {lr_init:.3e} -> {lr_final:.3e} | "
-        f"scale LR {scale_lr_init:.3e} -> {scale_lr_final:.3e}",
-        flush=True,
-    )
 
     for epoch in range(args.epochs):
         random.shuffle(images)
@@ -172,36 +156,10 @@ def train(args):
             mean2d_grad = RasterizeFunction.last_mean2d_grad
             img_h, img_w = int(image["height"]), int(image["width"])
 
-            # Stop structural edits past 70% of total steps
+            # Stop structural edits past 70% of total steps.
             allow_densify = iteration < densify_until
-            # Opacity reset every 3,000 steps — only while densifying
+            # Opacity reset every 3,000 steps, only while densifying.
             do_reset = (iteration % 3000 == 0) and (iteration > 0) and allow_densify
-
-            if iteration % 100 == 0:
-                if mean2d_grad is None:
-                    print(
-                        f"[Step {iteration}] means2d.grad=None "
-                        "(backward did not populate densification grads)",
-                        flush=True,
-                    )
-                else:
-                    gxy = mean2d_grad[:, :2].detach()
-                    gxy_px = gxy * t.tensor(
-                        [img_w / 2.0, img_h / 2.0], device=gxy.device, dtype=gxy.dtype
-                    )
-                    gn = t.norm(gxy, dim=-1)
-                    gn_px = t.norm(gxy_px, dim=-1)
-                    print(
-                        f"[Step {iteration}] means2d.grad: "
-                        f"shape={tuple(mean2d_grad.shape)} "
-                        f"raw max={float(gn.max()):.3e} mean={float(gn.mean()):.3e} | "
-                        f"pixel-scaled max={float(gn_px.max()):.3e} "
-                        f"mean={float(gn_px.mean()):.3e} "
-                        f"nz={int((gn > 0).sum())}/{gn.numel()} "
-                        f"(H={img_h}, W={img_w}) allow_densify={allow_densify} "
-                        f"mu_lr={get_mu_lr(optimizer):.3e}",
-                        flush=True,
-                    )
 
             accumulate_densification_stats(
                 gaussians,
@@ -265,23 +223,24 @@ def train(args):
 
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(
-        description="3D Gaussian Splatting Training & De-Lighting Engine"
-    )
-    parser.add_argument("-d", "--dataset", type=str, required=True, help="path for loading data")
+    parser = argparse.ArgumentParser(description="3D Gaussian Splatting training")
+    parser.add_argument("-d", "--dataset", type=str, required=True, help="image directory")
     parser.add_argument(
         "--colmap-workspace",
         type=str,
         default=None,
-        help="precomputed COLMAP workspace (default: reuse <dataset>_colmap if complete)",
+        help="precomputed COLMAP workspace (default: <dataset>_colmap when that workspace is complete)",
     )
-    parser.add_argument("--delight", action="store_true", help="activate delighting")
-    parser.add_argument("--lr", type=float, default=0.001, help="learning rate (unused when extent LRs set)")
     parser.add_argument("-e", "--epochs", type=int, default=100, help="epochs")
-    parser.add_argument("-o", "--output", type=str, default="./output", help="output folder")
+    parser.add_argument("-o", "--output", type=str, default="output", help="folder for gaussians_final.pt")
     parser.add_argument("-c", "--checkpoints", type=int, default=5, help="number of checkpoints")
-    parser.add_argument("-cp", "--checkpoint_path", type=str, default="./checkpoints")
-    parser.add_argument("--benchmark", action="store_true", help="save benchmark")
+    parser.add_argument(
+        "-cp",
+        "--checkpoint_path",
+        type=str,
+        default="checkpoints",
+        help="folder for epoch checkpoints",
+    )
     return parser.parse_args()
 
 

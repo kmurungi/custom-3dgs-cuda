@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
+#include "cuda_check.h"
 #define GLM_FORCE_CUDA
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
@@ -7,7 +8,7 @@
 #include <glm/gtx/quaternion.hpp>
 
 
-//main projection kernel 
+// Project Gaussians from world space into screen space. 
 __global__ void projection_fused(
     int total_gaussians, 
     const float3* __restrict__ mu3d,               // N x 3
@@ -20,7 +21,7 @@ __global__ void projection_fused(
     float3* __restrict__ cov2d,                    // N x 3 symmetric 2x2 covariance (a, b, c)
     float* __restrict__ depths                     // N camera-space z
 ){ 
-    // 1 Thread per Gaussian
+    // One Gaussian per thread.
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total_gaussians) return;
 
@@ -56,7 +57,7 @@ __global__ void projection_fused(
 
 
     // -------------------------------------------------------------------------
-    // 2. COVARIANCE PROJECTIONS
+    // 2. COVARIANCE PROJECTION
     // -------------------------------------------------------------------------
 
     //convert to glm matrices 
@@ -100,12 +101,11 @@ __global__ void projection_fused(
     a += 0.3f;
     c += 0.3f;
 
-    // Write upper-triangular 2D covariance components (a, b, c) since matrix is symetric
+    // Write upper-triangular 2D covariance components (a, b, c). The matrix is symmetric.
     cov2d[idx] = make_float3(a, b, c);
 
 }
 
-//pass in set 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> project_gaussians_to_2d(
     int total_gaussians, 
     const torch::Tensor  mu3d,               // N x 3
@@ -115,47 +115,39 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> project_gaussians_to_2d(
     const torch::Tensor  camera_translation,// 3 x 1 vector
     float fx, float fy, float cx, float cy
 ){
-    // cuda tensor checks
-    TORCH_CHECK(mu3d.is_cuda(), "3D means must be a CUDA tensor");
-    TORCH_CHECK(q3d.is_cuda(), "quarternions must be a CUDA tensor");
-    TORCH_CHECK(s3d.is_cuda(), "scales must be a CUDA tensor");
-    TORCH_CHECK(camera_rotation.is_cuda(), "camera rotation must be a CUDA tensor");
-    TORCH_CHECK(camera_translation.is_cuda(), "camera translation must be a CUDA tensor");
+    CHECK_INPUT_FP32(mu3d);
+    CHECK_INPUT_FP32(q3d);
+    CHECK_INPUT_FP32(s3d);
+    CHECK_INPUT_FP32(camera_rotation);
+    CHECK_INPUT_FP32(camera_translation);
 
-    // contiguous checks
-    TORCH_CHECK(mu3d.is_contiguous(), "3D means must be contiguous in memory");
-    TORCH_CHECK(q3d.is_contiguous(), "quarternions must be contiguous in memory");
-    TORCH_CHECK(s3d.is_contiguous(), "scales must be contiguous in memory");
-    TORCH_CHECK(camera_rotation.is_contiguous(), "camera rotation must be contiguous in memory");
-    TORCH_CHECK(camera_translation.is_contiguous(), "camera translation must be contiguous in memory");
-
-    // extract float pointer from tensor
+    // FP32 device pointers.
     const float3* mu3d_ptr = reinterpret_cast<const float3*>(mu3d.data_ptr<float>());
     const float4* q3d_ptr = reinterpret_cast<const float4*>(q3d.data_ptr<float>());
     const float3* s3d_ptr = reinterpret_cast<const float3*>(s3d.data_ptr<float>());
     const float3* camera_rotation_ptr = reinterpret_cast<const float3*>(camera_rotation.data_ptr<float>());
     const float3* camera_translation_ptr = reinterpret_cast<const float3*>(camera_translation.data_ptr<float>());
 
-    // 1 gaussian per thread
-    int numThreadsPerBlock = 256;
-    int numBlocks = (total_gaussians + numThreadsPerBlock - 1)/numThreadsPerBlock;
+    // One Gaussian per thread.
+    const int threads = 256;
+    const int blocks = (total_gaussians + threads - 1) / threads;
     
-    //output locations
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(mu3d.device());
-    torch::Tensor mu2d_tensor  = torch::zeros({total_gaussians, 2}, options);
-    torch::Tensor cov2d_tensor = torch::zeros({total_gaussians, 3}, options); // (a, b, c)
-    torch::Tensor depths_tensor = torch::zeros({total_gaussians}, options);
+    torch::Tensor mean_2d = torch::zeros({total_gaussians, 2}, options);
+    torch::Tensor cov_2d = torch::zeros({total_gaussians, 3}, options);
+    torch::Tensor depths = torch::zeros({total_gaussians}, options);
 
-    float2* mu2d_ptr  = reinterpret_cast<float2*>(mu2d_tensor.data_ptr<float>());
-    float3* cov2d_ptr = reinterpret_cast<float3*>(cov2d_tensor.data_ptr<float>());
-    float* depths_ptr = depths_tensor.data_ptr<float>();
+    float2* mean_2d_ptr = reinterpret_cast<float2*>(mean_2d.data_ptr<float>());
+    float3* cov_2d_ptr = reinterpret_cast<float3*>(cov_2d.data_ptr<float>());
+    float* depths_ptr = depths.data_ptr<float>();
 
-    projection_fused<<<numBlocks, numThreadsPerBlock>>>(
+    projection_fused<<<blocks, threads>>>(
         total_gaussians,
-        mu3d_ptr, q3d_ptr, s3d_ptr, camera_rotation_ptr, camera_translation_ptr, 
-        fx, fy, cx, cy, 
-        mu2d_ptr, cov2d_ptr, depths_ptr
+        mu3d_ptr, q3d_ptr, s3d_ptr, camera_rotation_ptr, camera_translation_ptr,
+        fx, fy, cx, cy,
+        mean_2d_ptr, cov_2d_ptr, depths_ptr
     );
+    CUDA_CHECK(cudaGetLastError());
 
-    return std::make_tuple(mu2d_tensor, cov2d_tensor, depths_tensor);
+    return std::make_tuple(mean_2d, cov_2d, depths);
 }

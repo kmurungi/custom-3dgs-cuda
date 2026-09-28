@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
+#include "cuda_check.h"
 
 
 __global__ void count_overlaps(
@@ -317,19 +318,11 @@ launch_rasterization(
         return empty_buffers();
     }
 
-    // cuda tensor checks
-    TORCH_CHECK(depths.is_cuda(), "depths must be a CUDA tensor");
-    TORCH_CHECK(mean_2d.is_cuda(), "2D means must be a CUDA tensor");
-    TORCH_CHECK(cov_2d.is_cuda(), "2D Cov must be a CUDA tensor");
-    TORCH_CHECK(colors.is_cuda(), "colors must be a CUDA tensor");
-    TORCH_CHECK(alpha.is_cuda(), "Alpha must be a CUDA tensor");
-
-    // contiguous checks
-    TORCH_CHECK(depths.is_contiguous(), "depths must be contiguous in memory");
-    TORCH_CHECK(mean_2d.is_contiguous(), "2D means must be contiguous in memory");
-    TORCH_CHECK(cov_2d.is_contiguous(), "2D Cov must be contiguous in memory");
-    TORCH_CHECK(colors.is_contiguous(), "colors must be contiguous in memory");
-    TORCH_CHECK(alpha.is_contiguous(), "Alpha must be contiguous in memory");
+    CHECK_INPUT_FP32(depths);
+    CHECK_INPUT_FP32(mean_2d);
+    CHECK_INPUT_FP32(cov_2d);
+    CHECK_INPUT_FP32(colors);
+    CHECK_INPUT_FP32(alpha);
 
     // shape checks — cov must be packed upper-triangular (N, 3)
     TORCH_CHECK(mean_2d.dim() == 2 && mean_2d.size(0) == num_gaussians && mean_2d.size(1) == 2,
@@ -341,14 +334,14 @@ launch_rasterization(
     TORCH_CHECK(depths.numel() == num_gaussians, "depths must have N elements");
     TORCH_CHECK(alpha.numel() == num_gaussians, "alpha must have N elements");
 
-    // extract float pointer from tensor
+    // FP32 device pointers.
     const float* depths_ptr = depths.data_ptr<float>();
     const float2* mean_2d_ptr = reinterpret_cast<const float2*>(mean_2d.data_ptr<float>());
     const float* cov_2d_ptr = cov_2d.data_ptr<float>();
     const float3* colors_ptr = reinterpret_cast<const float3*>(colors.data_ptr<float>());
     const float* alpha_ptr = alpha.data_ptr<float>();
 
-    // 1 gaussian per thread
+    // One Gaussian per thread.
     const int threads = 256;
     int blocks = (num_gaussians + threads - 1) / threads;
 
@@ -365,8 +358,9 @@ launch_rasterization(
         width,
         height,
         num_overlap_ptr
-    ); 
-    
+    );
+    CUDA_CHECK(cudaGetLastError());
+
     /*////////////////////////////
     PREFIX ARRAY + CREATION OF BUFFER ARRAY
     */////////////////////////////
@@ -374,15 +368,13 @@ launch_rasterization(
     int* offset_ptr = offset.data_ptr<int>();
     size_t temp_storage_bytes = 0; 
     
-    cub::DeviceScan::ExclusiveSum( 
-        nullptr, temp_storage_bytes, 
-        num_overlap_ptr, offset_ptr, num_gaussians
-    ); // query temp storage size
+    CUDA_CHECK((cub::DeviceScan::ExclusiveSum(
+        nullptr, temp_storage_bytes,
+        num_overlap_ptr, offset_ptr, num_gaussians)));
     auto scan_temp = torch::empty({static_cast<long>(temp_storage_bytes)}, byte_options);
-    cub::DeviceScan::ExclusiveSum(
+    CUDA_CHECK((cub::DeviceScan::ExclusiveSum(
         scan_temp.data_ptr(), temp_storage_bytes,
-        num_overlap_ptr, offset_ptr, num_gaussians
-    ); // prefix sum returned in offset
+        num_overlap_ptr, offset_ptr, num_gaussians)));
 
     /*////////////////////////////
     KEY GENERATION + DUPLICATION: KERNEL 2 
@@ -390,11 +382,11 @@ launch_rasterization(
     int last_offset = 0;
     int last_count = 0;
 
-    // mem back to cpu (safe: num_gaussians > 0 guaranteed above)
-    cudaMemcpy(
-        &last_offset, offset_ptr + num_gaussians - 1, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(
-        &last_count, num_overlap_ptr + num_gaussians - 1, sizeof(int), cudaMemcpyDeviceToHost);
+    // Copy the last prefix-sum entries back to the host. num_gaussians > 0 above.
+    CUDA_CHECK((cudaMemcpy(
+        &last_offset, offset_ptr + num_gaussians - 1, sizeof(int), cudaMemcpyDeviceToHost)));
+    CUDA_CHECK((cudaMemcpy(
+        &last_count, num_overlap_ptr + num_gaussians - 1, sizeof(int), cudaMemcpyDeviceToHost)));
     int total_duplicated_pairs = last_offset + last_count;
 
     // Early exit: no tile overlaps
@@ -418,7 +410,8 @@ launch_rasterization(
         height,
         reinterpret_cast<uint64_t*>(unsorted_keys_ptr),
         unsorted_ids_ptr
-    ); 
+    );
+    CUDA_CHECK(cudaGetLastError());
 
     /*////////////////////////////
     RADIX SORT
@@ -427,21 +420,19 @@ launch_rasterization(
     auto sorted_ids = torch::empty({total_duplicated_pairs}, int_options);
 
     temp_storage_bytes = 0;
-    cub::DeviceRadixSort::SortPairs(
+    CUDA_CHECK((cub::DeviceRadixSort::SortPairs(
         nullptr, temp_storage_bytes,
         reinterpret_cast<uint64_t*>(unsorted_keys_ptr),
         reinterpret_cast<uint64_t*>(sorted_keys.data_ptr<int64_t>()),
         unsorted_ids_ptr, sorted_ids.data_ptr<int>(),
-        total_duplicated_pairs
-    );
+        total_duplicated_pairs)));
     auto sort_temp = torch::empty({static_cast<long>(temp_storage_bytes)}, byte_options);
-    cub::DeviceRadixSort::SortPairs(
+    CUDA_CHECK((cub::DeviceRadixSort::SortPairs(
         sort_temp.data_ptr(), temp_storage_bytes,
         reinterpret_cast<uint64_t*>(unsorted_keys_ptr),
         reinterpret_cast<uint64_t*>(sorted_keys.data_ptr<int64_t>()),
         unsorted_ids_ptr, sorted_ids.data_ptr<int>(),
-        total_duplicated_pairs
-    );
+        total_duplicated_pairs)));
 
 
     /*////////////////////////////
@@ -455,7 +446,8 @@ launch_rasterization(
         total_duplicated_pairs,
         reinterpret_cast<uint64_t*>(sorted_keys.data_ptr<int64_t>()),
         tile_ranges_ptr
-    ); 
+    );
+    CUDA_CHECK(cudaGetLastError());
 
     /*////////////////////////////
     FINAL RENDERING 
@@ -488,7 +480,8 @@ launch_rasterization(
         rendered_img_ptr,
         final_T_ptr,
         n_contrib_ptr
-    ); 
+    );
+    CUDA_CHECK(cudaGetLastError());
 
     return std::make_tuple(rendered_img, sorted_ids, tile_ranges, final_T, n_contrib);
 }

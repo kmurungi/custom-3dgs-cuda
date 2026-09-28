@@ -19,22 +19,19 @@ from gaussian_splatting.scene.gaussian import gaussian
 from gaussian_splatting.utils.dataloader import parse_colmap
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
 def resolve_checkpoint(path: Path | None) -> Path:
     """Prefer an explicit path, else final output, else newest checkpoint."""
     if path is not None:
-        checkpoint = path.expanduser().resolve()
+        checkpoint = path.expanduser()
         if not checkpoint.is_file():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
         return checkpoint
 
-    final_path = REPO_ROOT / "output" / "gaussians_final.pt"
+    final_path = Path("output") / "gaussians_final.pt"
     if final_path.is_file():
         return final_path
 
-    checkpoint_dir = REPO_ROOT / "checkpoints"
+    checkpoint_dir = Path("checkpoints")
     candidates = sorted(checkpoint_dir.glob("epoch_*.pt"), key=lambda p: p.stat().st_mtime)
     if not candidates:
         raise FileNotFoundError(
@@ -46,8 +43,9 @@ def resolve_checkpoint(path: Path | None) -> Path:
 
 def resolve_colmap_workspace(dataset: Path, workspace: Path | None) -> Path:
     if workspace is not None:
-        return workspace.expanduser().resolve()
-    default = dataset.expanduser().resolve().parent / f"{dataset.name}_colmap"
+        return workspace.expanduser()
+    dataset = dataset.expanduser()
+    default = dataset.parent / f"{dataset.name}_colmap"
     if not default.is_dir():
         raise FileNotFoundError(
             f"COLMAP workspace not found: {default}. Pass --colmap-workspace."
@@ -235,7 +233,7 @@ def parse_args() -> argparse.Namespace:
         "-d",
         "--dataset",
         type=Path,
-        default=REPO_ROOT / "Horse",
+        default=Path("Horse"),
         help="original image folder (used to locate <name>_colmap)",
     )
     parser.add_argument(
@@ -255,7 +253,7 @@ def parse_args() -> argparse.Namespace:
         "-o",
         "--output",
         type=Path,
-        default=REPO_ROOT / "output" / "renders",
+        default=Path("output") / "renders",
         help="directory for rendered images and attribute export",
     )
     parser.add_argument(
@@ -293,7 +291,7 @@ def main() -> None:
     if not sparse.is_dir():
         raise FileNotFoundError(f"Missing sparse model: {sparse}")
 
-    out_dir = args.output.expanduser().resolve()
+    out_dir = args.output.expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[run] Checkpoint: {checkpoint}")

@@ -1,5 +1,6 @@
 #include "delight_backward.h"
 #include <cuda_runtime.h>
+#include "cuda_check.h"
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
 
@@ -180,16 +181,16 @@ launch_backward_SH(
     const torch::Tensor k_j,
     const torch::Tensor camera_position
 ){
-    TORCH_CHECK(colors_grad.is_cuda() && colors_grad.is_contiguous(), "colors_grad must be CUDA contiguous");
-    TORCH_CHECK(mu.is_cuda() && mu.is_contiguous(), "mu must be CUDA contiguous");
-    TORCH_CHECK(albedo.is_cuda() && albedo.is_contiguous(), "albedo must be CUDA contiguous");
-    TORCH_CHECK(k_j.is_cuda() && k_j.is_contiguous(), "k_j must be CUDA contiguous");
-    TORCH_CHECK(camera_position.is_cuda() && camera_position.is_contiguous(), "camera_position must be CUDA contiguous");
+    CHECK_INPUT_FP32(colors_grad);
+    CHECK_INPUT_FP32(mu);
+    CHECK_INPUT_FP32(albedo);
+    CHECK_INPUT_FP32(k_j);
+    CHECK_INPUT_FP32(camera_position);
     TORCH_CHECK(camera_position.numel() >= 3, "camera_position must have 3 elements");
 
     int num_gaussians = mu.size(0);
-    int numThreadsPerBlock = 256;
-    int numBlocks = (num_gaussians + numThreadsPerBlock - 1) / numThreadsPerBlock;
+    const int threads = 256;
+    const int blocks = (num_gaussians + threads - 1) / threads;
 
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(mu.device());
     torch::Tensor albedo_grad = torch::zeros({num_gaussians, 3}, options);
@@ -198,11 +199,11 @@ launch_backward_SH(
 
     auto cam_cpu = camera_position.cpu().contiguous();
     const float* cam_ptr = cam_cpu.data_ptr<float>();
-    float3 camera_position_ = make_float3(cam_ptr[0], cam_ptr[1], cam_ptr[2]);
+    float3 camera_world = make_float3(cam_ptr[0], cam_ptr[1], cam_ptr[2]);
 
-    backward_SH<<<numBlocks, numThreadsPerBlock>>>(
+    backward_SH<<<blocks, threads>>>(
         num_gaussians,
-        camera_position_,
+        camera_world,
         reinterpret_cast<const float3*>(colors_grad.data_ptr<float>()),
         reinterpret_cast<const float3*>(mu.data_ptr<float>()),
         reinterpret_cast<const float3*>(albedo.data_ptr<float>()),
@@ -211,6 +212,7 @@ launch_backward_SH(
         k_j_grad.data_ptr<float>(),
         reinterpret_cast<float3*>(mu_grad.data_ptr<float>())
     );
+    CUDA_CHECK(cudaGetLastError());
 
     return std::make_tuple(albedo_grad, k_j_grad, mu_grad);
 }

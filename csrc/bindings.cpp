@@ -144,10 +144,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("SH", &spherical_harmonics, "3DGS Spherical Harmonics (CUDA)");
     m.def("rasterize", &rasterize, "3DGS Tile Rasterization (CUDA)");
 
-    //backwards kernels
-    m.def("backwards_rasterization", &backwards_rasterization, "3DGS Backwards Rasterization (CUDA)"); 
-    m.def("backwards_SH", &backwards_SH, "3DGS backwards Delighting (CUDA)"); 
-    m.def("backwards_projection", &backwards_projection, "3DGS Backwards Projection (CUDA)"); 
+    // Backward kernels. Python names stay backwards_* so existing callers keep working.
+    m.def("backwards_rasterization", &backwards_rasterization, "3DGS Backward Rasterization (CUDA)");
+    m.def("backwards_SH", &backwards_SH, "3DGS Backward Spherical Harmonics (CUDA)");
+    m.def("backwards_projection", &backwards_projection, "3DGS Backward Projection (CUDA)"); 
 
 
 }

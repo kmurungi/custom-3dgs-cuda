@@ -13,6 +13,7 @@ build/
 venv/
 .env
 .ipynb_checkpoints/
+.pytest_cache/
 
 # CUDA / compiled extensions / CMake
 *.pyd
@@ -82,6 +83,12 @@ Horse_colmap/
 *.jpeg
 *.png
 *.webp
+
+# Portfolio figures (showcase images under assets/)
+!assets/**/*.jpg
+!assets/**/*.jpeg
+!assets/**/*.png
+!assets/**/*.webp
 *.mp4
 *.mov
 *.avi

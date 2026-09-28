@@ -6,23 +6,18 @@ class camera:
     def __init__(self, N): 
         self.N = N
 
-        # extrinsics 
-        self.R = t.zeros(N, 3, 3) # rotation from world to camera
-        self.t = t.zeros(N, 3) # translation from world to camera
-        
+        # extrinsics
+        self.R = t.zeros(N, 3, 3, dtype=t.float32)  # world-to-camera rotation
+        self.t = t.zeros(N, 3, dtype=t.float32)  # world-to-camera translation
+
         # intrinsics
-        self.fx = t.zeros(N, 1) # x focal length
-        self.fy = t.zeros(N, 1) # y focal length
-        self.cx = t.zeros(N, 1) # x principle component
-        self.cy = t.zeros(N, 1) # y principle component 
+        self.fx = t.zeros(N, 1, dtype=t.float32)  # focal length x
+        self.fy = t.zeros(N, 1, dtype=t.float32)  # focal length y
+        self.cx = t.zeros(N, 1, dtype=t.float32)  # principal point x
+        self.cy = t.zeros(N, 1, dtype=t.float32)  # principal point y
 
     def sample_camera_view(self):
-        """
-        Samples Camera view for forward pass.
-
-        Returns:
-            list of dictionaries with pose / intrinsics (and image_path if set)
-        """
+        """Sample one view per camera, including image_path when it is set."""
         image_paths = getattr(self, "image_paths", [None] * self.N)
         image_names = getattr(self, "image_names", [None] * self.N)
 

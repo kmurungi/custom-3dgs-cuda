@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
+#include "cuda_check.h"
 #define GLM_FORCE_CUDA
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
@@ -98,23 +99,15 @@ torch::Tensor launch_spherical_harmonics_kernel(
     const torch::Tensor albedo_coeff, // N x 3 
     const torch::Tensor illumination_coeff // (N, 15, 3) flattened to 1 contiguous array 
 ){ 
-    /*
-    TENSOR CHECKS
-    */
-    TORCH_CHECK(camera_position.is_cuda(), "camera_position must be a CUDA tensor");
-    TORCH_CHECK(mu_world.is_cuda(), "mu_world must be a CUDA tensor");
-    TORCH_CHECK(albedo_coeff.is_cuda(), "albedo_coeff must be a CUDA tensor");
-    TORCH_CHECK(illumination_coeff.is_cuda(), "illumination_coeff must be a CUDA tensor");
-
-    TORCH_CHECK(camera_position.is_contiguous(), "camera_position must be contiguous in memory");
-    TORCH_CHECK(mu_world.is_contiguous(), "mu_world must be contiguous in memory");
-    TORCH_CHECK(albedo_coeff.is_contiguous(), "albedo_coeff must be contiguous in memory");
-    TORCH_CHECK(illumination_coeff.is_contiguous(), "illumination_coeff must be contiguous in memory");
+    CHECK_INPUT_FP32(camera_position);
+    CHECK_INPUT_FP32(mu_world);
+    CHECK_INPUT_FP32(albedo_coeff);
+    CHECK_INPUT_FP32(illumination_coeff);
     TORCH_CHECK(camera_position.numel() >= 3, "camera_position must have 3 elements");
 
     auto cam_cpu = camera_position.cpu().contiguous();
     const float* cam_ptr = cam_cpu.data_ptr<float>();
-    float3 camera_position_ = make_float3(cam_ptr[0], cam_ptr[1], cam_ptr[2]);
+    float3 camera_world = make_float3(cam_ptr[0], cam_ptr[1], cam_ptr[2]);
     const float3* mu_world_ptr = reinterpret_cast<const float3*>(mu_world.data_ptr<float>()); 
     const float3* albedo_coeff_ptr = reinterpret_cast<const float3*>(albedo_coeff.data_ptr<float>()); 
     const float* illumination_coeff_ptr = reinterpret_cast<const float*>(illumination_coeff.data_ptr<float>()); 
@@ -124,14 +117,15 @@ torch::Tensor launch_spherical_harmonics_kernel(
     torch::Tensor colors = torch::zeros({total_gaussians, 3}, options); // N x 3 
     float3* colors_ptr = reinterpret_cast<float3*>(colors.data_ptr<float>()); 
 
-    int threads = 256; 
-    int blocks = (total_gaussians + threads - 1)/threads; 
+    const int threads = 256;
+    const int blocks = (total_gaussians + threads - 1) / threads;
 
     spherical_harmonics_kernel<<<blocks, threads>>>(
-        total_gaussians, camera_position_, 
-        mu_world_ptr, albedo_coeff_ptr, illumination_coeff_ptr, 
+        total_gaussians, camera_world,
+        mu_world_ptr, albedo_coeff_ptr, illumination_coeff_ptr,
         colors_ptr
-    ); 
+    );
+    CUDA_CHECK(cudaGetLastError()); 
 
     return colors; 
 }

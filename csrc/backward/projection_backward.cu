@@ -1,5 +1,6 @@
 #include "projection_backward.h"
 #include <cuda_runtime.h>
+#include "cuda_check.h"
 #define GLM_FORCE_CUDA
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
@@ -149,24 +150,24 @@ launch_backward_projection(
     const torch::Tensor camera_translation,
     float fx, float fy, float cx, float cy
 ){
-    TORCH_CHECK(mean_2d_grad.is_cuda() && mean_2d_grad.is_contiguous(), "mean_2d_grad must be CUDA contiguous");
-    TORCH_CHECK(cov_2d_grad.is_cuda() && cov_2d_grad.is_contiguous(), "cov_2d_grad must be CUDA contiguous");
-    TORCH_CHECK(mu.is_cuda() && mu.is_contiguous(), "mu must be CUDA contiguous");
-    TORCH_CHECK(q.is_cuda() && q.is_contiguous(), "q must be CUDA contiguous");
-    TORCH_CHECK(s.is_cuda() && s.is_contiguous(), "s must be CUDA contiguous");
-    TORCH_CHECK(camera_rotation.is_cuda() && camera_rotation.is_contiguous(), "camera_rotation must be CUDA contiguous");
-    TORCH_CHECK(camera_translation.is_cuda() && camera_translation.is_contiguous(), "camera_translation must be CUDA contiguous");
+    CHECK_INPUT_FP32(mean_2d_grad);
+    CHECK_INPUT_FP32(cov_2d_grad);
+    CHECK_INPUT_FP32(mu);
+    CHECK_INPUT_FP32(q);
+    CHECK_INPUT_FP32(s);
+    CHECK_INPUT_FP32(camera_rotation);
+    CHECK_INPUT_FP32(camera_translation);
 
     int num_gaussians = mu.size(0);
-    int numThreadsPerBlock = 256;
-    int numBlocks = (num_gaussians + numThreadsPerBlock - 1) / numThreadsPerBlock;
+    const int threads = 256;
+    const int blocks = (num_gaussians + threads - 1) / threads;
 
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(mu.device());
     torch::Tensor mu_grad = torch::zeros({num_gaussians, 3}, options);
     torch::Tensor q_grad = torch::zeros({num_gaussians, 4}, options);
     torch::Tensor s_grad = torch::zeros({num_gaussians, 3}, options);
 
-    backward_projection<<<numBlocks, numThreadsPerBlock>>>(
+    backward_projection<<<blocks, threads>>>(
         num_gaussians,
         reinterpret_cast<const float2*>(mean_2d_grad.data_ptr<float>()),
         reinterpret_cast<const float3*>(cov_2d_grad.data_ptr<float>()),
@@ -180,6 +181,7 @@ launch_backward_projection(
         reinterpret_cast<float4*>(q_grad.data_ptr<float>()),
         reinterpret_cast<float3*>(s_grad.data_ptr<float>())
     );
+    CUDA_CHECK(cudaGetLastError());
 
     return std::make_tuple(mu_grad, q_grad, s_grad);
 }

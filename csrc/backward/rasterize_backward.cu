@@ -1,5 +1,6 @@
 #include "rasterize_backward.h"
 #include <cuda_runtime.h>
+#include "cuda_check.h"
 
 
 __global__ void backward_rasterization(
@@ -250,32 +251,22 @@ launch_backward_rasterization(
     int height,
     int width
 ){
-    TORCH_CHECK(grad_output.is_cuda(), "grad_output must be a CUDA tensor");
-    TORCH_CHECK(mean_2d.is_cuda(), "mean_2d must be a CUDA tensor");
-    TORCH_CHECK(cov_2d.is_cuda(), "cov_2d must be a CUDA tensor");
-    TORCH_CHECK(colors.is_cuda(), "colors must be a CUDA tensor");
-    TORCH_CHECK(alpha.is_cuda(), "alpha must be a CUDA tensor");
-    TORCH_CHECK(sorted_ids.is_cuda(), "sorted_ids must be a CUDA tensor");
-    TORCH_CHECK(tile_ranges.is_cuda(), "tile_ranges must be a CUDA tensor");
-    TORCH_CHECK(final_T.is_cuda(), "final_T must be a CUDA tensor");
-    TORCH_CHECK(n_contrib.is_cuda(), "n_contrib must be a CUDA tensor");
-
-    TORCH_CHECK(grad_output.is_contiguous(), "grad_output must be contiguous");
-    TORCH_CHECK(mean_2d.is_contiguous(), "mean_2d must be contiguous");
-    TORCH_CHECK(cov_2d.is_contiguous(), "cov_2d must be contiguous");
-    TORCH_CHECK(colors.is_contiguous(), "colors must be contiguous");
-    TORCH_CHECK(alpha.is_contiguous(), "alpha must be contiguous");
-    TORCH_CHECK(sorted_ids.is_contiguous(), "sorted_ids must be contiguous");
-    TORCH_CHECK(tile_ranges.is_contiguous(), "tile_ranges must be contiguous");
-    TORCH_CHECK(final_T.is_contiguous(), "final_T must be contiguous");
-    TORCH_CHECK(n_contrib.is_contiguous(), "n_contrib must be contiguous");
+    CHECK_INPUT_FP32(grad_output);
+    CHECK_INPUT_FP32(mean_2d);
+    CHECK_INPUT_FP32(cov_2d);
+    CHECK_INPUT_FP32(colors);
+    CHECK_INPUT_FP32(alpha);
+    CHECK_INPUT_FP32(final_T);
+    CHECK_INPUT_INT32(sorted_ids);
+    CHECK_INPUT_INT32(tile_ranges);
+    CHECK_INPUT_INT32(n_contrib);
 
     TORCH_CHECK(mean_2d.dim() == 2 && mean_2d.size(0) == num_gaussians && mean_2d.size(1) == 2,
-                "mean_2d must be [N, 2]");
+                "mean_2d must have shape (N, 2)");
     TORCH_CHECK(cov_2d.dim() == 2 && cov_2d.size(0) == num_gaussians && cov_2d.size(1) == 3,
-                "cov_2d must be [N, 3]");
+                "cov_2d must have shape (N, 3)");
     TORCH_CHECK(colors.dim() == 2 && colors.size(0) == num_gaussians && colors.size(1) == 3,
-                "colors must be [N, 3]");
+                "colors must have shape (N, 3)");
     TORCH_CHECK(alpha.numel() == num_gaussians, "alpha must have N elements");
     TORCH_CHECK(final_T.numel() == height * width, "final_T must have H*W elements");
     TORCH_CHECK(n_contrib.numel() == height * width, "n_contrib must have H*W elements");
@@ -289,10 +280,10 @@ launch_backward_rasterization(
     dim3 blocks(tiles_x, tiles_y, 1);
 
     auto options = torch::TensorOptions().dtype(torch::kFloat32).device(mean_2d.device());
-    torch::Tensor dl_mean2d = torch::zeros({num_gaussians, 2}, options);
-    torch::Tensor dl_cov2d = torch::zeros({num_gaussians, 3}, options);
-    torch::Tensor dl_colors = torch::zeros({num_gaussians, 3}, options);
-    torch::Tensor dl_alpha = torch::zeros({num_gaussians, 1}, options);
+    torch::Tensor grad_mean_2d = torch::zeros({num_gaussians, 2}, options);
+    torch::Tensor grad_cov_2d = torch::zeros({num_gaussians, 3}, options);
+    torch::Tensor grad_colors = torch::zeros({num_gaussians, 3}, options);
+    torch::Tensor grad_alpha = torch::zeros({num_gaussians, 1}, options);
 
     backward_rasterization<<<blocks, threads>>>(
         num_gaussians,
@@ -307,11 +298,12 @@ launch_backward_rasterization(
         reinterpret_cast<const int2*>(tile_ranges.data_ptr<int>()),
         final_T.data_ptr<float>(),
         n_contrib.data_ptr<int>(),
-        reinterpret_cast<float2*>(dl_mean2d.data_ptr<float>()),
-        reinterpret_cast<float3*>(dl_cov2d.data_ptr<float>()),
-        reinterpret_cast<float3*>(dl_colors.data_ptr<float>()),
-        dl_alpha.data_ptr<float>()
+        reinterpret_cast<float2*>(grad_mean_2d.data_ptr<float>()),
+        reinterpret_cast<float3*>(grad_cov_2d.data_ptr<float>()),
+        reinterpret_cast<float3*>(grad_colors.data_ptr<float>()),
+        grad_alpha.data_ptr<float>()
     );
+    CUDA_CHECK(cudaGetLastError());
 
-    return std::make_tuple(dl_mean2d, dl_cov2d, dl_colors, dl_alpha);
+    return std::make_tuple(grad_mean_2d, grad_cov_2d, grad_colors, grad_alpha);
 }
