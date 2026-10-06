@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from gaussian_splatting.rasterizer.rasterize import RasterizeFunction, rasterize
 from gaussian_splatting.utils.dataloader import load_colmap, parse_colmap
+from gaussian_splatting.utils.loss import calculate_loss
 from gaussian_splatting.utils.optim import (
     get_mu_lr,
     get_positional_lr_scheduler,
@@ -151,7 +152,7 @@ def train(args):
             optimizer.zero_grad(set_to_none=True)
             rendered_img = rasterize(gaussians, image)
             update_max_radii2d(gaussians, RasterizeFunction.last_radii2d)
-            loss = t.mean(t.abs(gt_img - rendered_img))  # plain L1 for first training loop
+            loss = calculate_loss(gt_img, rendered_img)
             loss.backward()
             mean2d_grad = RasterizeFunction.last_mean2d_grad
             img_h, img_w = int(image["height"]), int(image["width"])
@@ -186,7 +187,7 @@ def train(args):
                     scene_extent=fixed_scene_extent,
                     max_screen_size=max_screen_size,
                     reset_opacity=do_reset,
-                    max_gaussians=800_000,
+                    max_gaussians=500_000,
                     allow_densify=allow_densify,
                 )
                 for key in stats_window:

@@ -1,6 +1,6 @@
 # Custom 3D Gaussian Splatting (CUDA)
 
-C++/CUDA 3D Gaussian Splatting engine: COLMAP reconstruction, anisotropic Gaussian optimization, and a pybind11 rasterizer. Forward and backward kernels project covariances with GLM, shade spherical harmonics, and α-blend depth-sorted 16×16 tiles; `scripts/train.py` optimizes with L1 and writes Inria `point_cloud.ply`.
+C++/CUDA 3D Gaussian Splatting engine: COLMAP reconstruction, anisotropic Gaussian optimization, and a pybind11 rasterizer. Forward and backward kernels project covariances with GLM, shade spherical harmonics, and α-blend depth-sorted 16×16 tiles; `scripts/train.py` optimizes with L1+D-SSIM and writes Inria `point_cloud.ply`.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ C++/CUDA 3D Gaussian Splatting engine: COLMAP reconstruction, anisotropic Gaussi
     │  parse cameras, seed μ from the point cloud
     ▼
  Python trainer                     scripts/train.py
-    │  L1 loss, Adam, densify / prune
+    │  L1+D-SSIM, Adam, densify / prune
     ▼
  pybind11 C++ extension             csrc/bindings.cpp  →  custom_rasterizer_cuda
     │
@@ -35,10 +35,20 @@ C++/CUDA 3D Gaussian Splatting engine: COLMAP reconstruction, anisotropic Gaussi
 
 ![Horse ground truth vs. render](assets/horse_gt_vs_render.png)
 
-![Horse exported point cloud](assets/horse_point_cloud.png)
+![Horse ground truth vs. render (view 2)](assets/horse_gt_vs_render_2.png)
+
+Horse scene, 151 views, RTX 2060 Super (8 GB). Full-frame scores are limited by densify budget / background coverage on 8 GB VRAM; center-crop scores isolate the subject under the same constraint.
 
 ```
-[eval] Views: 120 | L1: 0.012345 | PSNR: 28.104 dB
+[eval] full  | Views: 151 | L1: 0.266530 | PSNR: 10.336 dB | SSIM: 0.470
+[eval] crop  | Views: 151 | L1: 0.143482 | PSNR: 14.629 dB | SSIM: 0.581 (center 50%)
+```
+
+```
+[bench] Device: NVIDIA GeForce RTX 2060 SUPER | Gaussians: 100000 | warmup: 100 | iters: 100
+resolution        forward_ms   backward_ms       fps
+1280x720               8.747        71.124     114.3
+1920x1080             17.724       154.640      56.4
 ```
 
 ## Build
